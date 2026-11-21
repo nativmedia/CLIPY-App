@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import quote
 import re
 
-from . import captions, framing, laughter, media, select, social, thumbs, tts, uploads
+from . import captions, emphasis, framing, laughter, media, select, social, thumbs, tts, uploads
 from .captions import CaptionStyle, Word
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "projects"
@@ -83,6 +83,10 @@ class Project:
     export_dir: str | None = None
     export_status: str | None = None
     export_error: str | None = None
+    # Clip count before a "gen more" run, so stopping it keeps the earlier clips.
+    more_from: int | None = None
+    # A short, non-fatal message for the project card (e.g. no new moments left).
+    notice: str | None = None
     created: float = field(default_factory=time.time)
 
     @property
@@ -122,6 +126,8 @@ class Project:
         d["has_export_dir"] = self.export_output_dir is not None
         d["export_ready"] = bool(self.export_output_dir and self.export_output_dir.is_dir())
         d["has_logo"] = bool(d.pop("logo"))
+        d["can_more"] = (self.status in ("done", "error") and self.settings.get("mode", "clipping") != "filming"
+                          and (self.dir / "words.json").exists())
         d["progress"] = round(self.progress, 3)
         # Always the source video's own thumbnail, so projects are easy to recognise.
         if self.video_id:
@@ -180,6 +186,15 @@ def stop(p: Project) -> Project:
             if _active and _active[0] == p.id:
                 _terminate(_active[1])
                 current = _checkpoint(p.id) or current
+            if current.more_from is not None:
+                # Stopping "gen more" keeps the project as it was, plus any new clip already finished.
+                kept = current.clips[:current.more_from] + [c for c in current.clips[current.more_from:]
+                                                            if c.get("status") == "done"]
+                current = replace(current, status="done", stage="done", progress=1.0, error=None, clips=kept,
+                                  more_from=None, notice="Gen more dihentikan.")
+                current.save()
+                _projects[p.id] = current
+                return current
             clips = [clip if clip.get("status") == "done" else
                      {**clip, "status": "cancelled", "video": None, "thumb": None, "srt": None}
                      for clip in current.clips]
@@ -281,6 +296,19 @@ def used_ranges(source_key: str, skip: str | None = None) -> list[tuple[float, f
         for c in p.clips
         if "start" in c and "end" in c
         and (p.status != "cancelled" or c.get("status") == "done")
+    )
+
+
+def used_clips(source_key: str) -> list[select.Pick]:
+    """Every clip already made from this video (any project), with its title."""
+    return sorted(
+        (select.Pick(float(c["start"]), float(c["end"]), str(c.get("title", "")), "")
+         for p in all_projects()
+         if p.source_key == source_key
+         for c in p.clips
+         if "start" in c and "end" in c
+         and (p.status != "cancelled" or c.get("status") == "done")),
+        key=lambda pick: pick.start,
     )
 
 
@@ -446,6 +474,22 @@ def _local_words(words: list[Word], start: float, end: float) -> list[Word]:
     return local
 
 
+def _transcribe_clip(source: Path, duration: float, on_progress) -> list[Word]:
+    """Get word onsets from the audio that will actually appear in the clip."""
+    wav = source.with_suffix(".caption.wav")
+    try:
+        from . import transcribe
+
+        media.extract_audio(source, wav)
+        words, _ = transcribe.transcribe(str(wav), on_progress=on_progress)
+        return _local_words(words, 0, duration)
+    except (OSError, RuntimeError, ValueError, ImportError, subprocess.SubprocessError):
+        traceback.print_exc()
+        return []
+    finally:
+        wav.unlink(missing_ok=True)
+
+
 def _run(p: Project) -> None:
     if p.music_url and not p.music:
         from . import music
@@ -517,7 +561,8 @@ def _run(p: Project) -> None:
             if not 0 < p.duration <= 4 * 3600:
                 raise ValueError("Durasi video tidak valid atau lebih dari 4 jam")
             from . import youtube_transcript
-            words, origin, p.language, reason, precision = youtube_transcript.fetch(info)
+            words, origin, p.language, reason, precision = youtube_transcript.fetch(
+                info, prefer_word_timing=p.settings.get("mode", "clipping") == "clipping")
             if words:
                 p.transcript_origin = origin
                 p.transcript_timing = precision
@@ -546,6 +591,7 @@ def _run(p: Project) -> None:
                 p.save()
             words, p.language = transcribe.transcribe(str(audio), None, _span(p, *STAGES["transcribing"]), on_status=status)
             p.transcript_origin = "whisper"
+            p.transcript_timing = "kata"
             audio.unlink(missing_ok=True)
         _save_words(p, words)
 
@@ -590,7 +636,8 @@ def _run(p: Project) -> None:
                               exclude=used_ranges(p.source_key, skip=p.id), mood=p.settings.get("mood", "auto"),
                               allow_approximate=getattr(p, 'transcript_timing', None) == 'segmen',
                               on_approximate=uncertain_boundary,
-                              objective=p.settings.get('objective', ''))
+                              objective=p.settings.get('objective', ''),
+                              avoid=[c for c in used_clips(p.source_key) if c.title])
     if getattr(p, 'transcript_timing', None) == 'segmen' and len(picks) > 1:
         lengths = [item.end - item.start for item in picks]
         if max(lengths) - min(lengths) > 3:
@@ -633,11 +680,17 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
     d = p.dir
     width, height, fit = opts["width"], opts["height"], opts["fit"]
     thumb_cfg = opts["thumb_cfg"]
-    for stale in ("video", "thumb", "srt", "ass"):
+    for stale in ("video", "thumb", "srt", "ass", "intro_duration"):
         clip.pop(stale, None)
 
+    fast = bool(clip.pop("fast_edit", False))
     clip["status"] = "downloading"
     src = d / f"src_{n}.mp4"
+    window = _edit_window(p, n, clip["start"], clip["end"]) if fast and not p.upload_id else None
+    if not src.exists() and window:
+        # The editor already fetched this stretch at full quality: cut it locally.
+        path, w0 = window
+        src = media.cut_section(path, clip["start"] - w0, clip["end"] - w0, src, _span(p, base, base + share * 0.25))
     if not src.exists():
         fetched = _span(p, base, base + share * 0.25)
         if p.upload_id:
@@ -657,12 +710,27 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
         src = clean
 
     local = _local_words(words, clip["start"], clip["end"])
-    caption_words = laughter.caption_words(src, local, clip["end"] - clip["start"])
+    duration = clip["end"] - clip["start"]
+    timing = p.transcript_timing
+    reused = _reuse_caption_words(p, clip, words) if fast else None
+    if reused is not None:
+        caption_words, emphasized = reused
+    elif timing == "segmen" or (timing is None and p.transcript_origin == "whisper"):
+        # Segment tracks still guide selection. Get real onsets for the chosen
+        # cut, including old Whisper checkpoints made before audio PTS sync.
+        clip["status"] = "transcribing"
+        p.save()
+        local = _transcribe_clip(src, duration, _span(p, base + share * .32, base + share * .39)) or local
+    if reused is None:
+        # Word-sized entries let emphasis target single words even when the
+        # transcript only had segment timing.
+        caption_words = captions.expand_coarse_words(laughter.caption_words(src, local, duration))
+        caption_words = apply_caption_fixes(caption_words, clip.get("caption_fixes") or [], clip["start"])
+        emphasized = emphasis.choose(src, caption_words, getattr(p, "language", None))
+    _save_caption_words(p, clip, caption_words, emphasized)
     ass = p.clip_asset_path(clip, "ass")
     srt = p.clip_asset_path(clip, "srt")
-    ass.write_text(captions.build_ass(caption_words, opts["style"], width, height), encoding="utf-8")
-    srt.write_text(captions.build_srt(caption_words, opts["style"], width, height), encoding="utf-8")
-    clip["srt"], clip["ass"] = srt.name, ass.name
+    ass.write_text(captions.build_ass(caption_words, opts["style"], width, height, emphasized=emphasized), encoding="utf-8")
 
     source_ratio = film._source_ratio(src) if clip_ratio is not None else None
     plan = None
@@ -671,7 +739,11 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
         try:
             frame_width, frame_height = (media.clip_frame_size(width, clip_ratio, source_ratio, output_height=height)
                                          if clip_ratio is not None and source_ratio is not None else (width, height))
-            plan = framing.plan_crop(src, frame_width, frame_height, local)
+            key = {"frame": [frame_width, frame_height], "inset": list(inset) if isinstance(inset, tuple) else bool(inset)}
+            plan = _reuse_plan(p, clip, src, key, local) if fast else None
+            if plan is None:
+                plan = framing.plan_crop(src, frame_width, frame_height, local)
+            _save_plan(p, clip, plan, key)
         except Exception:
             # Framing is a nicety; a centre crop is still a usable short.
             traceback.print_exc()
@@ -688,39 +760,51 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
                       background_inset=background_inset)
 
     clip["status"] = "thumbnail"
-    frame = d / f"frame_{n}.jpg"
-    if thumb_cfg.get("source") == "upload" and p.upload:
-        thumbs.prepare(d / p.upload, frame, width, height)
-    else:
-        media.grab_frame(src, frame, width, height, fit, plan, clip_ratio=clip_ratio,
-                         background=background, source_ratio=source_ratio, background_inset=background_inset)
     thumb = d / f"thumb_{n}.jpg"
-    title_text = thumbs.thumbnail_text(thumb_cfg, clip, " ".join(w.text for w in local))
-    thumbs.add_title(frame, thumb, clip["title"], "none" if thumb_cfg.get("text_mode") == "none" else thumb_cfg.get("title_style", "bold"), custom_text=title_text,
-                     number=n, sequence=thumb_cfg.get("sequence") or ("number" if thumb_cfg.get("numbered") else "off"),
-                     position=thumb_cfg.get("position"))
-    frame.unlink(missing_ok=True)
-    if opts["brand"]:
-        thumbs.add_brand(thumb, opts["brand"], opts["brand_position"], media.brand_margin(width, height))
+    if not (fast and thumb.exists()):
+        # An edit keeps the clip's title, so its thumbnail can stay as it is.
+        frame = d / f"frame_{n}.jpg"
+        if thumb_cfg.get("source") == "upload" and p.upload:
+            thumbs.prepare(d / p.upload, frame, width, height)
+        else:
+            media.grab_frame(src, frame, width, height, fit, plan, clip_ratio=clip_ratio,
+                             background=background, source_ratio=source_ratio, background_inset=background_inset)
+        title_text = thumbs.thumbnail_text(thumb_cfg, clip, " ".join(w.text for w in local))
+        thumbs.add_title(frame, thumb, clip["title"], "none" if thumb_cfg.get("text_mode") == "none" else thumb_cfg.get("title_style", "bold"), custom_text=title_text,
+                         number=n, sequence=thumb_cfg.get("sequence") or ("number" if thumb_cfg.get("numbered") else "off"),
+                         position=thumb_cfg.get("position"))
+        frame.unlink(missing_ok=True)
+        if opts["brand"]:
+            thumbs.add_brand(thumb, opts["brand"], opts["brand_position"], media.brand_margin(width, height))
     clip["thumb"] = thumb.name
 
     out = p.clip_asset_path(clip, "mp4")
+    intro_duration = 0.0
     if voice:
         clip["status"] = "dubbing"
         try:
-            speech = tts.speak(clip["title"], voice, d / f"dub_{n}.mp3", speed=opts["dubbing_speed"])
-            media.add_intro(body, thumb, speech, out, width, height)
-            body.unlink(missing_ok=True)
+            dub = d / f"dub_{n}.mp3"
+            speech = dub if fast and dub.exists() else tts.speak(clip["title"], voice, dub, speed=opts["dubbing_speed"])
+            intro_duration = media.add_intro(body, thumb, speech, out, width, height)
         except Exception as e:
             # A dubbing hiccup shouldn't cost the whole clip: keep it without the intro.
             traceback.print_exc()
             clip["note"] = f"no dubbed intro ({e or e.__class__.__name__})"
-    if body.exists():
+        else:
+            body.unlink(missing_ok=True)
+            clip["intro_duration"] = intro_duration
+    if not intro_duration:
         body.replace(out)
     if getattr(p, "music", None):
         mixed = d / f"clip_{n}_music.mp4"
         media.mix_music(out, d / p.music, mixed, start=p.settings.get("music_start", 0), length=p.settings.get("music_length"))
         mixed.replace(out)
+    if intro_duration:
+        ass.write_text(captions.build_ass(caption_words, opts["style"], width, height,
+                                         offset=intro_duration, emphasized=emphasized), encoding="utf-8")
+    srt.write_text(captions.build_srt(caption_words, opts["style"], width, height, offset=intro_duration,
+                                      emphasized=emphasized), encoding="utf-8")
+    clip["srt"], clip["ass"] = srt.name, ass.name
     clip["video"] = out.name
     p.progress = base + share
 
@@ -780,6 +864,8 @@ def sequence_parts(p: Project) -> list[tuple[Path, float]]:
         body = p.dir / f"body_{n}.mp4"
         if body.is_file():
             parts.append((body, 0.0))
+        elif clip.get("intro_duration"):
+            parts.append((video, clip["intro_duration"]))
         elif p.settings.get("mode") != "filming" and p.settings.get("thumb", {}).get("voice") and not clip.get("note", "").startswith("no dubbed intro"):
             # Older renders kept only the final video and the generated speech.
             dub = p.dir / f"dub_{n}.mp3"
@@ -804,6 +890,387 @@ def ensure_posts(p: Project) -> dict:
     return data
 
 
+# ---------- simple clip editing: extend/trim and per-word caption fixes ----------
+
+EDIT_MIN_DURATION = 3.0
+
+
+def _caption_file(p: Project, n: int) -> Path:
+    return p.dir / f"caption_{n}.json"
+
+
+def _save_caption_words(p: Project, clip: dict, words: list[Word], emphasized: set[int] = frozenset()) -> None:
+    """The exact words a clip's captions were drawn from, in source-video seconds,
+    with the ones that were emphasized, so an edit can reuse both."""
+    start = float(clip["start"])
+    data = {"from": start, "to": float(clip["end"]), "fixes": clip.get("caption_fixes") or [], "words": [
+        {"text": w.text, "start": round(w.start + start, 3), "end": round(w.end + start, 3), **({"strong": True} if i in emphasized else {})}
+        for i, w in enumerate(words)]}
+    _caption_file(p, clip["n"]).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_caption_file(p: Project, n: int) -> dict | None:
+    """{"from", "to", "words", "fixes"}: the words a render drew, and the fixes already in them."""
+    path = _caption_file(p, n)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):  # written before the range was stored
+        return {"from": data[0]["start"], "to": data[-1]["end"], "words": data, "fixes": None} if data else None
+    return {"from": float(data["from"]), "to": float(data["to"]), "words": data["words"], "fixes": data.get("fixes") or []}
+
+
+def _pending_fixes(clip: dict, saved: dict | None) -> list[dict]:
+    """Fixes not yet drawn into the saved words. Applying one twice could drop a neighbour."""
+    fixes = clip.get("caption_fixes") or []
+    if saved is None or saved.get("fixes") is None:
+        return fixes
+    return [f for f in fixes if f not in saved["fixes"]]
+
+
+def _reuse_caption_words(p: Project, clip: dict, words: list[Word]) -> tuple[list[Word], set[int]] | None:
+    """Caption words for an edited clip without transcribing or analysing it again.
+
+    Words inside the previous cut come back exactly as they were drawn (timing,
+    laughter cues, emphasis); added stretches use the project transcript and the
+    instant text rules for emphasis.
+    """
+    saved = _read_caption_file(p, clip["n"])
+    if saved is None:
+        return None
+    old_from, old_to, old = saved["from"], saved["to"], saved["words"]
+    start, end = float(clip["start"]), float(clip["end"])
+    kept = [w for w in old if start <= (w["start"] + w["end"]) / 2 < end]
+    added = [w for w in captions.expand_coarse_words(words)
+             if w.end > start and w.start < end and ((w.start + w.end) / 2 < old_from or (w.start + w.end) / 2 >= old_to)]
+    merged: list[tuple[Word, bool, bool]] = []  # (word, strong, new)
+    for w in kept:
+        merged.append((Word(w["text"], max(w["start"], start) - start, min(w["end"], end) - start), bool(w.get("strong")), False))
+    for w in added:
+        text = laughter.normalize_cues(w.text, w.end - w.start)
+        if text:
+            merged.append((Word(text, max(w.start, start) - start, min(w.end, end) - start), False, True))
+    merged.sort(key=lambda item: item[0].start)
+    plain = [w for w, _, _ in merged]
+    fixed = apply_caption_fixes(plain, _pending_fixes(clip, saved), start)
+    if [w.text for w in fixed] != [w.text for w in plain] or len(fixed) != len(plain):
+        # Fixes changed the words: map emphasis back by time.
+        strong_at = {round(w.start, 2) for (w, strong, _) in merged if strong}
+        new_at = [(w.start, w.end) for (w, _, new) in merged if new]
+        plain, merged = fixed, [(w, round(w.start, 2) in strong_at,
+                                 any(a <= w.start < b for a, b in new_at)) for w in fixed]
+    emphasized = {i for i, (_, strong, _) in enumerate(merged) if strong}
+    fresh = {i for i, (_, _, new) in enumerate(merged) if new}
+    if fresh:
+        quick = emphasis.choose(None, plain, getattr(p, "language", None), use_ai=False)
+        emphasized |= quick & fresh
+    return plain, emphasized
+
+
+def _plan_file(p: Project, n: int) -> Path:
+    return p.dir / f"framing_{n}.json"
+
+
+def _save_plan(p: Project, clip: dict, plan, key: dict) -> None:
+    """Keep a clip's framing in source seconds so an edit only analyses what it adds."""
+    path = _plan_file(p, clip["n"])
+    if plan is None:
+        path.unlink(missing_ok=True)
+        return
+    start = float(clip["start"])
+    segments = [{**asdict(seg), "start": round(seg.start + start, 3)} for seg in plan.segments]
+    path.write_text(json.dumps({"from": start, "to": float(clip["end"]), "key": key, "segments": segments}), encoding="utf-8")
+
+
+def _reuse_plan(p: Project, clip: dict, src: Path, key: dict, local: list[Word]):
+    path = _plan_file(p, clip["n"])
+    if not path.exists():
+        return None
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    if saved.get("key") != key:
+        return None
+    start, end = float(clip["start"]), float(clip["end"])
+    old_from, old_to = float(saved["from"]), float(saved["to"])
+
+    def seg(data: dict, at: float):
+        data = dict(data)
+        for name in ("secondary", "tertiary"):
+            if data.get(name) is not None:
+                data[name] = tuple(data[name])
+        data["start"] = round(at, 3)
+        return framing.Segment(**data)
+
+    def analyse(a: float, b: float) -> list:
+        """Framing for [a, b) (source seconds) of a stretch outside the old cut."""
+        if b - a < .05:
+            return []
+        part = src.with_name(f"{src.stem}.frame{int(a * 1000)}.mp4")
+        try:
+            media.cut_section(src, a - start, b - start, part)
+            words_here = [Word(w.text, w.start - (a - start), w.end - (a - start)) for w in local
+                          if w.end > a - start and w.start < b - start]
+            sub = framing.plan_crop(part, key["frame"][0], key["frame"][1], words_here)
+        finally:
+            part.unlink(missing_ok=True)
+        if sub is None:
+            return []
+        return [seg({**asdict(s), "secondary": s.secondary, "tertiary": s.tertiary}, s.start + a - start)
+                for s in sub.segments]
+
+    old = sorted(saved["segments"], key=lambda s: s["start"])
+    lo, hi = max(start, old_from), min(end, old_to)
+    reused = []
+    if hi > lo:
+        active = [s for s in old if s["start"] <= lo + 1e-3]
+        if active:
+            reused.append(seg(active[-1], lo - start))
+        reused += [seg(s, s["start"] - start) for s in old if lo + 1e-3 < s["start"] < hi]
+    head = analyse(start, min(old_from, end)) if start < old_from else []
+    tail = analyse(max(old_to, start), end) if end > old_to else []
+    segments = sorted(head + reused + tail, key=lambda s: s.start)
+    if not segments:
+        return None
+    segments[0].start = 0.0
+    return framing.Plan(segments)
+
+
+def _edit_window(p: Project, n: int, start: float, end: float) -> tuple[Path, float] | None:
+    """The full-quality stretch the editor downloaded, when it covers [start, end]."""
+    path, meta = p.dir / f"edit_window_{n}.mp4", _preview_path(p, n).with_suffix(".json")
+    if not (path.exists() and meta.exists()):
+        return None
+    data = json.loads(meta.read_text(encoding="utf-8"))
+    if data["from"] - .01 <= start and end <= data["to"] + .01:
+        return path, float(data["from"])
+    return None
+
+
+def _best_match(words: list[Word], fix: dict, offset: float = 0.0) -> int | None:
+    """Index of the word a fix was made on: the most time overlap, same spelling preferred."""
+    f0, f1 = float(fix["start"]), float(fix["end"])
+    original = str(fix.get("orig", "")).strip().lower()
+    best, best_score = None, 0.0
+    for i, word in enumerate(words):
+        w0, w1 = word.start + offset, word.end + offset
+        overlap = min(w1, f1) - max(w0, f0)
+        near = abs((w0 + w1) / 2 - (f0 + f1) / 2)
+        if overlap <= 0 and near > .15:
+            continue
+        score = max(overlap, 0) + (1.0 if original and word.text.strip().lower() == original else 0) - near * .1
+        if best is None or score > best_score:
+            best, best_score = i, score
+    return best
+
+
+def _apply_line_fix(words: list[Word], fix: dict, offset: float) -> list[Word]:
+    """Replace a whole sentence. New words share its time span by their length."""
+    f0, f1 = float(fix["start"]), float(fix["end"])
+    inside = [i for i, w in enumerate(words) if f0 - .05 <= (w.start + w.end) / 2 + offset <= f1 + .05]
+    tokens = str(fix.get("text", "")).split()
+    if not inside:
+        return words
+    first, last = inside[0], inside[-1]
+    t0, t1 = words[first].start, words[last].end
+    weights = [len(token) + 2 for token in tokens]
+    total = sum(weights) or 1
+    made, at = [], t0
+    for token, weight in zip(tokens, weights):
+        step = (t1 - t0) * weight / total
+        made.append(Word(token, round(at, 3), round(at + step, 3)))
+        at += step
+    return words[:first] + made + words[last + 1:]
+
+
+def apply_caption_fixes(words: list[Word], fixes: list[dict], offset: float = 0.0) -> list[Word]:
+    """Replace (or, with empty text, drop) the words the user corrected.
+
+    A fix with ``kind == "line"`` rewrites a whole sentence whose word count changed.
+    """
+    if not fixes:
+        return words
+    words = [Word(w.text, w.start, w.end) for w in words]
+    for fix in fixes:
+        if fix.get("kind") == "line":
+            words = _apply_line_fix(words, fix, offset)
+    drop: set[int] = set()
+    for fix in fixes:
+        if fix.get("kind") == "line":
+            continue
+        i = _best_match(words, fix, offset)
+        if i is None:
+            continue
+        text = " ".join(str(fix.get("text", "")).split())
+        if text:
+            words[i].text = text
+        else:
+            drop.add(i)
+    return [w for i, w in enumerate(words) if i not in drop]
+
+
+def edit_info(p: Project, n: int) -> dict:
+    """Everything the clip editor needs: range, limits and the words around the clip."""
+    clip = next(c for c in p.clips if c["n"] == n)
+    start, end = float(clip["start"]), float(clip["end"])
+    limit = max(float(p.settings["clip"]["max_duration"]), end - start)
+    total = float(p.duration or 0) or end + limit
+    lo, hi = max(0.0, start - limit), min(total, end + limit)
+    words = [w for w in captions.expand_coarse_words(_load_words(p)) if w.end > lo and w.start < hi]
+    saved = _read_caption_file(p, n)
+    if saved is not None:
+        # Inside the clip, show the words its captions were really drawn from.
+        words = [w for w in words if w.end <= saved["from"] or w.start >= saved["to"]] + [
+            Word(w["text"], w["start"], w["end"]) for w in saved["words"]]
+    words = apply_caption_fixes(sorted(words, key=lambda w: w.start), _pending_fixes(clip, saved))
+    return {
+        "n": n, "title": clip.get("title", ""), "start": start, "end": end,
+        "min_duration": EDIT_MIN_DURATION, "max_duration": limit,
+        "window": [round(lo, 3), round(hi, 3)], "duration": total,
+        "intro": float(clip.get("intro_duration") or 0),
+        "video": p.file_url(clip["video"]) if clip.get("video") else None,
+        "caption": _caption_look(p),
+        "words": [{"text": w.text, "start": round(w.start, 3), "end": round(w.end, 3)} for w in words],
+    }
+
+
+def _caption_look(p: Project) -> dict:
+    """What the editor needs to draw a close live preview of the captions."""
+    cfg = p.settings.get("caption") or {}
+    style = CaptionStyle(**cfg)
+    animation = captions.normalize_animation(style.animation)
+    spec = captions.STYLES[animation]
+    font = captions.normalize_font(style.font)
+    return {
+        "font": font,
+        "accent_font": captions.strong_font_for(spec, font),
+        "accent": captions.COLORS.get(style.color, captions.COLORS[captions.DEFAULT_COLOR]),
+        "case": spec.case or style.case,
+        "position": style.position,
+        "display": style.display or "sentence",
+        "animation": animation,
+        "size": captions.CAPTION_FONTS[font].size,
+        "max_lines": min(style.max_lines, captions.MAX_LINES),
+    }
+
+
+def _preview_path(p: Project, n: int) -> Path:
+    return p.dir / f"edit_preview_{n}.mp4"
+
+
+_preview_guard = threading.Lock()
+_preview_locks: dict[tuple[str, int], threading.Lock] = {}
+
+
+def edit_preview(p: Project, n: int) -> dict:
+    """A light video of the whole editable window, so the editor can play any range live.
+
+    Requests for the same clip queue up: the second one reuses the first one's file
+    instead of writing the same temporary files at the same time.
+    """
+    with _preview_guard:
+        lock = _preview_locks.setdefault((p.id, n), threading.Lock())
+    with lock:
+        return _edit_preview(p, n)
+
+
+def _edit_preview(p: Project, n: int) -> dict:
+    info = edit_info(p, n)
+    lo, hi = info["window"]
+    out = _preview_path(p, n)
+    meta = out.with_suffix(".json")
+    if out.exists() and meta.exists():
+        saved = json.loads(meta.read_text(encoding="utf-8"))
+        if abs(saved["from"] - lo) < .01 and abs(saved["to"] - hi) < .01:
+            return {**saved, "url": f"/api/projects/{p.id}/clips/{n}/edit/preview.mp4"}
+    part = p.dir / f"edit_preview_{n}.part.mp4"
+    part.unlink(missing_ok=True)
+    local = p.local_video
+    downloaded = None
+    if local and Path(local).exists():
+        source, skip = Path(local), lo
+    else:
+        # Only the window is fetched, not the whole video.
+        downloaded = media.download_section(p.url, lo, hi, p.dir / f"edit_window_{n}.mp4")
+        source, skip = downloaded, 0.0
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", f"{skip:.3f}", "-i", str(source), "-t", f"{hi - lo:.3f}",
+             "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:540,fps=30", "-c:v", "libx264", "-preset", "veryfast",
+             "-crf", "28", "-g", "15", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
+             "-movflags", "+faststart", str(part)],
+            check=True,
+        )
+    except Exception:
+        if downloaded:
+            downloaded.unlink(missing_ok=True)
+        raise
+    # A downloaded window stays (full quality): saving an edit cuts the clip from it
+    # instead of downloading again.
+    part.replace(out)
+    data = {"from": lo, "to": hi, "offset": lo}
+    meta.write_text(json.dumps(data), encoding="utf-8")
+    return {**data, "url": f"/api/projects/{p.id}/clips/{n}/edit/preview.mp4"}
+
+
+def edit_preview_file(p: Project, n: int) -> Path | None:
+    out = _preview_path(p, n)
+    return out if out.exists() else None
+
+
+def edit(p: Project, n: int, start: float, end: float, fixes: list[dict]) -> None:
+    """Save a new range and caption fixes, then render the clip again in place."""
+    clip = next(c for c in p.clips if c["n"] == n)
+    info = edit_info(p, n)
+    start, end = round(float(start), 3), round(float(end), 3)
+    if not (0 <= start < end <= info["duration"] + .01):
+        raise ValueError("Rentang clip di luar video sumber")
+    if end - start < EDIT_MIN_DURATION - .01:
+        raise ValueError(f"Clip minimal {EDIT_MIN_DURATION:g} detik")
+    if end - start > info["max_duration"] + .01:
+        raise ValueError(f"Clip maksimal {info['max_duration']:g} detik sesuai pengaturan proyek")
+    kept = [f for f in clip.get("caption_fixes") or []
+            if not any(abs(float(f["start"]) - float(x["start"])) < .05 for x in fixes)]
+    clean = [{"start": round(float(f["start"]), 3), "end": round(float(f["end"]), 3),
+              "text": str(f.get("text", ""))[:600], "orig": str(f.get("orig", ""))[:600],
+              **({"kind": "line"} if f.get("kind") == "line" else {})} for f in fixes]
+    moved = abs(start - float(clip["start"])) > .001 or abs(end - float(clip["end"])) > .001
+    with _lock:
+        if _projects.get(p.id) is not p or p.status not in ("done", "error") or (_active and _active[0] == p.id):
+            raise ValueError("Tunggu hingga proses project selesai")
+        clip["caption_fixes"] = kept + clean
+        clip["start"], clip["end"] = start, end
+        clip["edited"] = True
+        clip["fast_edit"] = True
+        if moved:
+            # The cut source covers the old range only; fetch it again.
+            for stale in (p.dir / f"src_{n}.mp4", p.dir / f"src_{n}_active.mp4"):
+                stale.unlink(missing_ok=True)
+        _fix_transcript(p, clean)
+        p.save()
+    retry(p, n)
+
+
+def _fix_transcript(p: Project, fixes: list[dict]) -> None:
+    """Carry corrections into the project transcript, so Gen More reuses them.
+
+    Only single-word entries are rewritten; a segment-timed line is left whole.
+    """
+    if not fixes:
+        return
+    words = _load_words(p)
+    changed = False
+    for fix in fixes:
+        if fix.get("kind") == "line":
+            continue  # a rewritten sentence has no reliable word timing to carry over
+        i = _best_match(words, fix)
+        if i is None or " " in words[i].text.strip():
+            continue
+        text = " ".join(str(fix.get("text", "")).split())
+        if text and text != words[i].text:
+            words[i].text, changed = text, True
+    if changed:
+        _save_words(p, words)
+
+
 def retry(p: Project, n: int) -> None:
     with _lock:
         if _projects.get(p.id) is not p or p.status not in ("done", "error") or (_active and _active[0] == p.id):
@@ -811,6 +1278,7 @@ def retry(p: Project, n: int) -> None:
         clip = next(c for c in p.clips if c["n"] == n)
         clip["status"] = "pending"
         clip.pop("error", None)
+        p.notice = None
         p.status, p.stage, p.progress, p.error = "clipping", f"retry clip {n}", STAGES["clipping"][0], None
         p.save()
         _queue.put(("retry", p.id, n))
@@ -852,8 +1320,85 @@ def _retry(p: Project, n: int) -> None:
     p.save()
 
 
+MORE_LIMIT = 10
+
+
+def more(p: Project, count: int) -> None:
+    """Queue `count` extra clips for a finished clipping project, reusing its transcript."""
+    if not 1 <= count <= MORE_LIMIT:
+        raise ValueError(f"Jumlah clip tambahan harus 1–{MORE_LIMIT}")
+    with _lock:
+        if (_projects.get(p.id) is not p or p.status not in ("done", "error")
+                or (_active and _active[0] == p.id)):
+            raise ValueError("Tunggu hingga proses project selesai")
+        if p.settings.get("mode", "clipping") == "filming":
+            raise ValueError("Gen more hanya tersedia untuk mode clipping")
+        if not (p.dir / "words.json").exists():
+            raise ValueError("Transkrip project ini tidak ditemukan")
+        p.more_from, p.notice = len(p.clips), None
+        p.status, p.stage, p.progress, p.error = "selecting", "picking more clips", STAGES["selecting"][0], None
+        p.save()
+        _queue.put(("more", p.id, count))
+
+
+def _more(p: Project, count: int) -> None:
+    """Pick new moments from the saved transcript and render only those clips."""
+    words = _load_words(p)
+    clip_cfg = p.settings["clip"]
+
+    def uncertain_boundary():
+        p.transcript_note = 'Batas clip diperkirakan karena timestamp subtitle tidak cukup rinci.'
+        p.save()
+
+    # Every clip already made from this video, this project's own included, may not be
+    # repeated: not its stretch, nor its wording or title at another time.
+    made = used_clips(p.source_key)
+    picks: list[select.Pick] = []
+    problem = None
+    for _ in range(2):  # a second ask covers picks dropped as duplicates
+        try:
+            picks += select.pick_clips(
+                words, count - len(picks), float(clip_cfg["max_duration"]), p.language,
+                exclude=[(c.start, c.end) for c in made + picks], mood=p.settings.get("mood", "auto"),
+                allow_approximate=getattr(p, 'transcript_timing', None) == 'segmen',
+                on_approximate=uncertain_boundary, objective=p.settings.get('objective', ''),
+                avoid=made + picks)
+        except ValueError as e:
+            problem = str(e)
+            break
+        if len(picks) >= count:
+            break
+    picks = picks[:count]
+    if not picks:
+        # Running out of fresh moments is not a failure of the clips already made.
+        p.status, p.stage, p.progress, p.more_from = "done", "done", 1.0, None
+        p.notice = ("Tidak ada momen baru lagi di video ini." if not problem or "no new moments" in problem
+                    else f"Gen more gagal: {problem}")
+        p.save()
+        return
+    first = max((int(c["n"]) for c in p.clips), default=0) + 1
+    new = [{"n": first + i, "start": c.start, "end": c.end, "title": c.title, "reason": c.reason,
+            "status": "pending"} for i, c in enumerate(picks)]
+    p.clips.extend(new)
+    _stage(p, "clipping", f"clip {new[0]['n']}/{len(p.clips)}")
+    opts = _clip_options(p)
+    lo, hi = STAGES["clipping"]
+    share = (hi - lo) / len(new)
+    for i, clip in enumerate(new):
+        p.stage = f"clip {clip['n']}/{len(p.clips)}"
+        _attempt_clip(p, clip, words, opts, lo + share * i, share)
+    rendered = sum(c["status"] == "done" for c in new)
+    p.status, p.stage, p.progress, p.error, p.more_from = "done", "done", 1.0, None, None
+    if rendered < len(new):
+        p.notice = f"{rendered} dari {len(new)} clip tambahan berhasil dibuat."
+    elif len(new) < count:
+        p.notice = f"Hanya {len(new)} momen baru yang tidak mengulang clip sebelumnya."
+    _export_results(p)
+    p.save()
+
+
 def _fail(p: Project, error: str) -> None:
-    p.status, p.stage, p.error = "error", "failed", error
+    p.status, p.stage, p.error, p.more_from = "error", "failed", error, None
     p.save()
 
 
@@ -874,7 +1419,9 @@ def _start_project(pid: str, args: list) -> subprocess.Popen:
 def _worker() -> None:
     global _active
     while (task := _queue.get()) is not None:
-        _, pid, *args = task if isinstance(task, tuple) else ("run", task)
+        kind, pid, *args = task if isinstance(task, tuple) else ("run", task)
+        if kind == "more":
+            args = ["more", *args]
         with _lock:
             if _shutting_down:
                 return

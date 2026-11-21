@@ -7,7 +7,7 @@ import math
 import subprocess
 from pathlib import Path
 
-from . import captions, keys, media, select, thumbs, tts
+from . import captions, emphasis, keys, media, select, thumbs, tts
 
 LOG = logging.getLogger(__name__)
 
@@ -616,9 +616,11 @@ def render(p, clip, opts, config):
         af = "apad" if serial else "loudnorm=I=-16:TP=-2:LRA=11"
         subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(voice), "-vf", f"setpts=N/({media.FPS}*TB)", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "fast", "-af", af, "-c:a", "aac", "-t", f"{total_frames / media.FPS:.6f}", "-movflags", "+faststart", str(draft)], check=True)
     ass = p.clip_asset_path(clip, "ass")
-    ass.write_text(captions.build_ass(words, opts["style"], width, height), encoding="utf-8")
+    words = captions.expand_coarse_words(words)
+    emphasized = emphasis.choose(voice, words, getattr(p, "language", None))
+    ass.write_text(captions.build_ass(words, opts["style"], width, height, emphasized=emphasized), encoding="utf-8")
     srt = p.clip_asset_path(clip, "srt")
-    srt.write_text(captions.build_srt(words, opts["style"], width, height), encoding="utf-8")
+    srt.write_text(captions.build_srt(words, opts["style"], width, height, emphasized=emphasized), encoding="utf-8")
     out = p.clip_asset_path(clip, "mp4")
     media.render_clip(draft, ass, out, width, height, "crop", brand=opts["brand"], brand_position=opts["brand_position"])
     if media.probe_duration(out) > config["max_duration"]:

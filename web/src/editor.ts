@@ -3,6 +3,8 @@
  * clip sits next to editable short, medium and long descriptions.
  */
 
+import { openClipEditor } from "./clip-editor";
+
 export type Clip = {
   n: number;
   title: string;
@@ -26,6 +28,9 @@ export type Project = {
   stage: string;
   progress: number;
   error: string | null;
+  /** True when "gen more" can add clips from this project's saved transcript. */
+  can_more?: boolean;
+  notice?: string | null;
   transcript_origin?: string | null;
   transcript_note?: string | null;
   transcription_backend?: string | null;
@@ -38,7 +43,7 @@ export type Project = {
     music_start?: number;
     music_length?: number | null;
     clip: { ratio: string; fit: string; count: number; max_duration: number; dubbing_speed?: number; clip_ratio?: string | null; background?: string | null; background_inset?: boolean };
-    caption: { font: string; animation: string; color: string; case: string; position?: number | null; display?: string | null; font_weight?: string; max_lines?: number };
+    caption: { animation: string; font?: string | null; color: string; case: string; position?: number | null; display?: string | null; max_lines?: number };
     thumb: { source: string; title_style: string; text?: string; text_mode?: "auto" | "manual" | "none"; numbered?: boolean; sequence?: string | null; position?: string | null; voice: string | null };
     brand?: { position: string; text?: string; style?: string; opacity?: number };
   };
@@ -95,10 +100,25 @@ const modalVideo = $<HTMLVideoElement>("#modal-video");
 const modalTitle = $<HTMLParagraphElement>("#modal-title");
 const modalEdit = $<HTMLButtonElement>("#modal-edit");
 let modalProject = "";
+let modalClip: Clip | null = null;
+let modalRatio = "9:16";
+let modalCanEdit = false;
+
+function canEditClip(project: Project, clip: Clip) {
+  return clip.status === "done" && !!clip.video && project.settings.mode !== "filming"
+    && ["done", "error", "cancelled"].includes(project.status);
+}
 
 export function openPreview(project: Project, clip: Clip) {
   if (!clip.video) return;
   modalProject = project.id;
+  modalClip = clip;
+  modalRatio = project.settings.clip.ratio;
+  modalCanEdit = canEditClip(project, clip);
+  modalEdit.disabled = false;
+  modalEdit.textContent = modalCanEdit ? "edit" : "open project";
+  modalEdit.classList.toggle("clip-edit", modalCanEdit);
+  modalEdit.title = modalCanEdit ? "Perpanjang/potong clip dan perbaiki caption" : "Buka dashboard project";
   modalVideo.src = clip.video;
   modalVideo.poster = clip.thumb ?? "";
   modalVideo.style.aspectRatio = project.settings.clip.ratio.replace(":", " / ");
@@ -122,10 +142,24 @@ $<HTMLButtonElement>("#modal-close").addEventListener("click", closePreview);
 modal.addEventListener("click", (e) => {
   if (e.target === modal) closePreview();
 });
-modalEdit.addEventListener("click", () => {
+modalEdit.addEventListener("click", async () => {
   const id = modalProject;
-  closePreview();
-  openEditor(id);
+  if (!modalCanEdit || !modalClip) {
+    closePreview();
+    openEditor(id);
+    return;
+  }
+  modalEdit.disabled = true;
+  modalEdit.textContent = "membuka…";
+  modalVideo.pause();
+  try {
+    // After saving, the project page shows the re-render progress.
+    await openClipEditor(id, modalClip.n, modalRatio, () => openEditor(id));
+    closePreview();
+  } catch (err) {
+    modalEdit.textContent = `edit gagal: ${(err as Error).message}`;
+    modalEdit.disabled = false;
+  }
 });
 
 // ---------- editor page ----------
@@ -206,7 +240,7 @@ function postsPanel(projectId: string, n: string, values: DashboardText): HTMLEl
   const show = (length: LengthName) => {
     tabs.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.length === length)));
     const area = el("textarea", {
-      value: values[length] ?? "", maxLength: { pendek: 70, sedang: 250, panjang: 600 }[length], spellcheck: true, rows: length === "pendek" ? 3 : 5,
+      value: values[length] ?? "", maxLength: { pendek: 70, sedang: 250, panjang: 600 }[length], spellcheck: true, rows: length === "pendek" ? 2 : length === "sedang" ? 4 : 6,
     });
     area.setAttribute("aria-label", `Deskripsi ${length}`);
     currentArea = area;
@@ -223,7 +257,7 @@ function postsPanel(projectId: string, n: string, values: DashboardText): HTMLEl
     b.addEventListener("click", () => show(length));
     tabs.append(b);
   }
-  box.append(el("div", { className: "field-head" }, el("span", { textContent: "deskripsi" }), copyButton), tabs, body, status);
+  box.append(el("div", { className: "field-head posts-head" }, el("span", { textContent: "deskripsi" }), tabs, copyButton), body, status);
   show("sedang");
   return box;
 }
@@ -237,6 +271,7 @@ function textPlaceholder(id: string): HTMLElement {
 
 function clipCard(p: Project, c: Clip): HTMLLIElement {
   const ratio = p.settings.clip.ratio.replace(":", " / ");
+  const ratioValue = p.settings.clip.ratio.replace(":", "/");
   let media: HTMLElement;
   if (c.video) {
     const v = el("video", { src: c.video, poster: c.thumb ?? "", controls: true, preload: "metadata", playsInline: true });
@@ -267,8 +302,28 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
     });
     actions.append(retry);
   }
+  if (c.status === "done" && c.video && p.settings.mode !== "filming") {
+    const edit = el("button", { type: "button", className: "text-button clip-edit", textContent: "edit" });
+    const running = !["done", "error", "cancelled"].includes(p.status);
+    edit.disabled = running;
+    edit.title = running ? "Tunggu proses selesai" : "Perpanjang/potong clip dan perbaiki caption";
+    edit.addEventListener("click", async () => {
+      edit.disabled = true;
+      edit.textContent = "membuka…";
+      try {
+        await openClipEditor(p.id, c.n, p.settings.clip.ratio, () => followUntilDone(p.id));
+        edit.textContent = "edit";
+      } catch (err) {
+        edit.textContent = `edit gagal: ${(err as Error).message}`;
+      } finally {
+        edit.disabled = false;
+      }
+    });
+    actions.append(edit);
+  }
 
 
+  media.style.setProperty("--ar", ratioValue);
   return el(
     "li",
     { className: "editor-clip" },
@@ -278,7 +333,6 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
       { className: "clip-body" },
       el("p", { className: "kicker" }, el("span", { textContent: `clip ${String(c.n).padStart(2, "0")} · ${clock(c.start)}–${clock(c.end)}` })),
       el("h3", { textContent: c.title }),
-      c.reason ? el("p", { className: "reason", textContent: c.reason }) : null,
       c.error ? el("p", { className: "hint error", textContent: c.error }) : null,
       c.note ? el("p", { className: "hint", textContent: c.note }) : null,
       actions,
@@ -586,12 +640,18 @@ function youtubeLink(url: string, content: HTMLElement | string, label: string):
 function dashboardProject(p: Project, routeId: string, selected: boolean): HTMLElement {
   const grid = el("ol", { className: "editor-clips" });
   const row = el("div", { className: "editor-row" }, grid);
+  const done = p.clips.filter((c) => c.status === "done").length;
+  // Desktop: one project fills the screen, its details on the left and its clips on the right.
   const section = el("section", { className: `editor-project${selected ? " is-target" : ""}` },
-    el("div", { className: "editor-intro" },
-      youtubeLink(p.url, el("img", { className: "editor-thumb", src: p.thumbnail, alt: "" }), "Buka video sumber di YouTube"),
-      el("div", {}, el("div", { className: "editor-title-row" }, el("h2", {}, youtubeLink(p.url, p.title || p.url, p.title || "Buka video sumber di YouTube")), ...titleActions(p)),
-        el("p", { className: "editor-meta", textContent: `${clipLayout(p.settings)} · ${p.clips.filter((c) => c.status === "done").length}/${p.clips.length} clips` }))),
-    scrollButtons(grid, row), row);
+    el("aside", { className: "editor-aside" },
+      el("div", { className: "editor-intro" },
+        youtubeLink(p.url, el("img", { className: "editor-thumb", src: p.thumbnail, alt: "" }), "Buka video sumber di YouTube"),
+        el("div", { className: "editor-intro-text" },
+          el("div", { className: "editor-title-row" }, el("h2", {}, youtubeLink(p.url, p.title || p.url, p.title || "Buka video sumber di YouTube")),
+            el("div", { className: "editor-title-actions" }, ...titleActions(p))),
+          el("p", { className: "editor-meta", textContent: `${clipLayout(p.settings)} · ${done}/${p.clips.length} clips` }))),
+      scrollButtons(grid, row)),
+    el("div", { className: "editor-main" }, row));
   section.dataset.projectId = p.id;
   section.id = `project-dashboard-${p.id}`;
 

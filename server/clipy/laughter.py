@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .captions import Word
+from .media import AUDIO_TIMELINE
 
 LOG = logging.getLogger(__name__)
 MODEL = Path(__file__).resolve().parent.parent / "models" / "yamnet.tflite"
@@ -88,7 +89,7 @@ def detect(source: Path, duration: float) -> list[Word]:
         return []
     pcm = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(source), "-t", f"{duration:.3f}",
-         "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-"],
+         "-map", "0:a:0", "-vn", "-af", AUDIO_TIMELINE, "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-"],
         capture_output=True,
     ).stdout
     samples = np.frombuffer(pcm, dtype="<f4").copy()

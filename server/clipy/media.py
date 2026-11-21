@@ -6,6 +6,7 @@ and the dubbed intro.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -32,6 +33,7 @@ RATIOS = {
 FITS = {"crop": "Crop to fill", "fit": "Fit (blurred background)"}
 
 FPS = 30
+AUDIO_TIMELINE = "aresample=async=1:first_pts=0:min_comp=0.020:min_hard_comp=0.020"
 
 
 def _hook(on_progress):
@@ -124,7 +126,7 @@ def cut_section(source: Path, start: float, end: float, out: Path, on_progress=N
     """Exactly [start, end] of a local video, re-encoded so it starts on a clean frame."""
     args = [
         "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{end - start:.3f}",
-        "-map", "0:v:0", "-map", "0:a:0?", "-pix_fmt", "yuv420p", *AUDIO,
+        "-map", "0:v:0", "-map", "0:a:0?", "-pix_fmt", "yuv420p", "-af", AUDIO_TIMELINE, *AUDIO,
         "-progress", "pipe:1", "-nostats", str(out),
     ]
     _run_ffmpeg(args, out.parent, end - start, on_progress)
@@ -151,9 +153,12 @@ def has_video(path: Path) -> bool:
 
 
 def extract_audio(source: Path, out: Path) -> Path:
-    """16 kHz mono WAV: what Whisper wants, and quick to decode."""
+    """Make a 16 kHz mono WAV on the same timeline as the video cuts."""
+    # WAV cannot retain stream offsets or timestamp gaps. Materialize them as
+    # silence, using the first audio track that cut_section also maps.
     subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", str(out)],
+        ["ffmpeg", "-y", "-v", "error", "-i", str(source), "-map", "0:a:0", "-vn",
+         "-af", AUDIO_TIMELINE, "-ac", "1", "-ar", "16000", str(out)],
         check=True,
     )
     return out
@@ -392,14 +397,18 @@ def reframe(width: int, height: int, fit: str, plan=None, offset: float = 0.0, s
         if len(segs) == 1:
             return segment_graph(segs[0], "[0:v]", "[r]", "one")
         k = len(segs)
-        parts = ["[0:v]split=" + str(k) + "".join(f"[s{i}]" for i in range(k))]
+        # Fill VFR gaps before splitting. Resetting each sparse segment's PTS
+        # first would erase time between its last frame and the next cut.
+        first_frame = round(offset * FPS)
+        offset = first_frame / FPS
+        parts = [f"[0:v]fps={FPS},split={k}" + "".join(f"[s{i}]" for i in range(k))]
         for i, s in enumerate(segs):
-            end = f":end={segs[i + 1].start + offset:.3f}" if i + 1 < k else ""
+            end = f":end={segs[i + 1].start + offset:.6f}" if i + 1 < k else ""
             parts.append(
-                f"[s{i}]trim=start={s.start + offset:.3f}{end},setpts=PTS-STARTPTS[q{i}];"
+                f"[s{i}]trim=start={s.start + offset:.6f}{end},setpts=PTS-STARTPTS[q{i}];"
                 + segment_graph(s, f"[q{i}]", f"[p{i}]", f"seg{i}")
             )
-        parts.append("".join(f"[p{i}]" for i in range(k)) + f"concat=n={k}:v=1:a=0,setpts=PTS+{offset:.3f}/TB[r]")
+        parts.append("".join(f"[p{i}]" for i in range(k)) + f"concat=n={k}:v=1:a=0,settb=1/{FPS},setpts=N+{first_frame}[r]")
         return ";".join(parts)
     if fit == "fit":
         return (
@@ -545,7 +554,9 @@ def render_clip(source: Path, ass: Path, out: Path, width: int, height: int, fit
                               offset if plan else 0.0, inset=background_inset)
              if clip_ratio is not None and source_ratio is not None
              else reframe(width, height, fit, plan, offset if plan else 0.0))
-    graph += f";[r]ass={render_ass.name}:fontsdir={fonts}[c0]"
+    # Evaluate captions at output frame timestamps, including frames duplicated
+    # from a low or variable frame-rate source.
+    graph += f";[r]fps={FPS},ass={render_ass.name}:fontsdir={fonts}[c0]"
     last = "c0"
     if brand:
         x, y = brand_overlay_xy(brand_position, brand_margin(width, height))
@@ -565,7 +576,7 @@ def render_clip(source: Path, ass: Path, out: Path, width: int, height: int, fit
     graph += f";[{last}]null[v]"
     args = [
         *inputs, "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-        "-pix_fmt", "yuv420p", "-r", str(FPS), *AUDIO, "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p", "-af", AUDIO_TIMELINE, *AUDIO, "-movflags", "+faststart",
         "-progress", "pipe:1", "-nostats", out.name,
     ]
     _run_ffmpeg(args, work, probe_duration(source), on_progress)
@@ -600,7 +611,7 @@ def mix_music(video: Path, music: Path, out: Path, start: float = 0, length: flo
             active.append((cursor, duration))
     gain = "volume=-6dB" + "".join(f",volume=-6dB:enable='between(t,{start:.3f},{end:.3f})'" for start, end in active)
     if sound:
-        graph = f"[1:a]{gain},aresample=48000[bg];[0:a]aresample=48000[voice];[voice][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891251[a]"
+        graph = f"[1:a]{gain},aresample=48000[bg];[0:a]aresample=48000:async=1:first_pts=0[voice];[voice][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.891251:latency=1[a]"
     else:
         graph = f"[1:a]{gain},aresample=48000,atrim=duration={duration:.3f}[a]"
     with tempfile.TemporaryDirectory(prefix="clipy-music-cut-", dir=out.parent) as folder:
@@ -637,22 +648,26 @@ def grab_frame(source: Path, out: Path, width: int, height: int, fit: str, plan=
     return out
 
 
-def add_intro(clip: Path, image: Path, voice: Path, out: Path, width: int, height: int) -> Path:
-    """Prepend the thumbnail as a still with the spoken title, then the clip."""
-    intro = probe_duration(voice) + 0.4
+def add_intro(clip: Path, image: Path, voice: Path, out: Path, width: int, height: int) -> float:
+    """Prepend the spoken title and return the exact duration before the clip."""
+    frames = math.ceil((probe_duration(voice) + 0.4) * FPS)
+    intro = frames / FPS
+    samples = frames * 48000 // FPS
     graph = (
-        f"[0:v]scale={width}:{height},setsar=1,fps={FPS},format=yuv420p,"
-        f"fade=t=out:st={intro - 0.25:.2f}:d=0.25[iv];"
-        f"[1:a]loudnorm=I=-16:TP=-2:LRA=11,aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={intro:.2f}[ia];"
+        f"[0:v]scale={width}:{height},setsar=1,trim=end_frame={frames},format=yuv420p,"
+        f"fade=t=out:st={intro - 0.25:.6f}:d=0.25[iv];"
+        f"[1:a]loudnorm=I=-16:TP=-2:LRA=11,aresample=48000:async=1:first_pts=0,"
+        f"aformat=channel_layouts=stereo,apad=whole_len={samples},atrim=end_sample={samples}[ia];"
         f"[2:v]fps={FPS},format=yuv420p,setsar=1[cv];"
-        "[2:a]aresample=48000,aformat=channel_layouts=stereo[ca];"
+        "[2:a]aresample=48000:async=1:first_pts=0,aformat=channel_layouts=stereo[ca];"
         "[iv][ia][cv][ca]concat=n=2:v=1:a=1[v][a]"
     )
     args = [
-        "-loop", "1", "-t", f"{intro:.2f}", "-i", str(image), "-i", str(voice), "-i", str(clip),
+        "-loop", "1", "-framerate", str(FPS), "-t", f"{intro:.6f}",
+        "-i", str(image), "-i", str(voice), "-i", str(clip),
         "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
         "-pix_fmt", "yuv420p", *AUDIO, "-movflags", "+faststart",
         "-progress", "pipe:1", "-nostats", str(out),
     ]
     _run_ffmpeg(args, out.parent, intro + probe_duration(clip))
-    return out
+    return intro

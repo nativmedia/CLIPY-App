@@ -5,7 +5,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { clipLayout, type Clip, type Project } from "./editor";
 
-type LabelGroup = "fonts" | "animations" | "cases" | "title_styles" | "voices" | "brand_styles";
+type LabelGroup = "animations" | "fonts" | "cases" | "title_styles" | "voices" | "brand_styles";
 type SettingsProps = {
   project: Project;
   label: (group: LabelGroup, value: string | null | undefined) => string;
@@ -26,7 +26,7 @@ export function ProjectSettings({ project: p, label, colors, positions }: Settin
     : "";
   return <>
     <dt>clip</dt><dd>{`${clipLayout(s)} · ${s.clip.count} clip${s.clip.count > 1 ? "s" : ""} · ≤${s.clip.max_duration}s`}</dd>
-    <dt>caption</dt><dd>{`${label("fonts", s.caption.font)} · ${label("animations", s.caption.animation)} · ${s.caption.max_lines ?? 2} baris · `}<span className="dot" style={{ background: colors[s.caption.color] ?? s.caption.color }} />{label("cases", s.caption.case)}</dd>
+    <dt>caption</dt><dd>{`${label("animations", s.caption.animation)}${s.caption.font ? ` · ${label("fonts", s.caption.font)}` : ""} · ${s.caption.display === "word" ? "per kata" : `${s.caption.max_lines ?? 2} baris`} · `}<span className="dot" style={{ background: colors[s.caption.color] ?? s.caption.color }} />{label("cases", s.caption.case)}</dd>
     <dt>thumbnail</dt><dd>{`${s.thumb.source} · ${label("title_styles", s.thumb.title_style)}${s.mode === "filming" ? "" : ` · ${s.thumb.voice ? label("voices", s.thumb.voice).split(" · ")[0] : "No Voice Over"}`}`}</dd>
     {p.transcript_origin && transcriptNames[p.transcript_origin] && <><dt>transkrip</dt><dd>{transcriptNames[p.transcript_origin]}</dd></>}
     {p.transcription_backend && <><dt>perangkat</dt><dd>{p.transcription_backend}</dd></>}

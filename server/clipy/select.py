@@ -7,7 +7,9 @@ actually winds down (a sentence end followed by a pause), within the chosen maxi
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from . import keys
 from .captions import Word
@@ -81,6 +83,35 @@ def transcript_lines(words: list[Word]) -> str:
     return "\n".join(lines)
 
 
+# Two clips this alike in wording or title are the same moment told twice.
+SAME_CONTENT = 0.6
+SAME_TITLE = 0.82
+_TOKEN = re.compile(r"[^\W\d_]{4,}", re.UNICODE)
+
+
+def _tokens(words: list[Word], start: float, end: float) -> set[str]:
+    return {t.casefold() for w in words if w.end > start and w.start < end for t in _TOKEN.findall(w.text)}
+
+
+def _title_key(title: str) -> str:
+    return " ".join(re.findall(r"\w+", title.casefold()))
+
+
+def duplicate_of(words: list[Word], candidate: Pick, others: list[Pick]) -> Pick | None:
+    """The earlier clip `candidate` repeats: same stretch, same wording, or the same title."""
+    mine = _tokens(words, candidate.start, candidate.end)
+    title = _title_key(candidate.title)
+    for other in others:
+        if candidate.start < other.end and candidate.end > other.start:
+            return other
+        theirs = _tokens(words, other.start, other.end)
+        if mine and theirs and len(mine & theirs) / min(len(mine), len(theirs)) >= SAME_CONTENT:
+            return other
+        if title and other.title and SequenceMatcher(None, title, _title_key(other.title)).ratio() >= SAME_TITLE:
+            return other
+    return None
+
+
 def durations(max_duration: float) -> tuple[float, float]:
     """(shortest acceptable, target) clip length for a chosen maximum."""
     return max(8.0, max_duration * 0.6), max_duration * 0.85
@@ -101,10 +132,12 @@ MOODS = {
 
 def pick_clips(words: list[Word], count: int, max_duration: float, language: str | None,
                exclude: list[tuple[float, float]] | None = None, mood: str = "auto",
-               allow_approximate: bool = False, on_approximate=None, objective: str = "") -> list[Pick]:
+               allow_approximate: bool = False, on_approximate=None, objective: str = "",
+               avoid: list[Pick] | None = None) -> list[Pick]:
     """
     `exclude` holds stretches already clipped in earlier projects of this video: the new clips
-    must be different moments, so they may not overlap any of them.
+    must be different moments, so they may not overlap any of them. `avoid` holds the clips
+    already made (with titles): new picks may not repeat their stretch, wording or title.
     """
     if not words:
         raise ValueError("no speech found in this video")
@@ -113,6 +146,7 @@ def pick_clips(words: list[Word], count: int, max_duration: float, language: str
     total = words[-1].end
     shortest, target = durations(max_duration)
     used = [Pick(s, e, "", "") for s, e in exclude or []]
+    made = list(avoid or [])
     taken_note = ""
     if used:
         spans = ", ".join(f"{p.start:.0f}-{p.end:.0f}" for p in used)
@@ -121,6 +155,13 @@ def pick_clips(words: list[Word], count: int, max_duration: float, language: str
             f"new clip must be a different moment that does not overlap any of them: {spans}.\n"
         )
     objective_note = f"User objective for clip selection: {objective.strip()}\n" if objective.strip() else ""
+    if made:
+        listed = "\n".join(f"- [{p.start:.0f}-{p.end:.0f}] {p.title}" for p in made)
+        taken_note += (
+            "Clips already made from this video are listed below. Do not pick them again, and do not "
+            "pick another moment that retells the same story, point or joke, even at a different time; "
+            f"every new clip must be a different topic:\n{listed}\n"
+        )
     user = (
         f"Video length: {total:.0f} seconds. Language: {language or 'unknown'}.\n"
         f"Mood preference: {mood.upper()}. {MOODS[mood]} "
@@ -153,12 +194,16 @@ def pick_clips(words: list[Word], count: int, max_duration: float, language: str
             continue
         if any(start < p.end and end > p.start for p in picks + used):
             continue
-        picks.append(Pick(start, end, str(c["title"]).strip()[:80], str(c.get("reason", "")).strip()))
+        pick = Pick(start, end, str(c["title"]).strip()[:80], str(c.get("reason", "")).strip())
+        # The model is told about earlier clips; this check makes sure it listened.
+        if duplicate_of(words, pick, made + picks):
+            continue
+        picks.append(pick)
         if len(picks) == count:
             break
     if not picks:
         raise ValueError(
-            "no new moments left that differ from earlier clips" if used else "the model didn't return any usable clips"
+            "no new moments left that differ from earlier clips" if used or made else "the model didn't return any usable clips"
         )
     return picks
 

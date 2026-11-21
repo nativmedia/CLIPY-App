@@ -537,6 +537,19 @@ def _center_wide(src_w: int, src_h: int) -> tuple[int, int, int, int]:
     return (src_w - w) // 4 * 2, (src_h - h) // 4 * 2, w, h
 
 
+def _face_inside(person: Person, crop, src_w: int, src_h: int, start: float, end: float) -> bool:
+    """True when this person's face sits fully, and not at the very edge, inside the crop."""
+    x, y, w, h = crop
+    seen = [s for s in person.track if start - 1.0 <= s[0] <= end + 1.0]
+    if not seen:
+        return False
+    fh = float(np.median([s[3] for s in seen])) * src_h
+    cy = float(np.median([s[4] for s in seen])) * src_h
+    cx = person.cx * src_w
+    return (x <= cx - fh * 0.45 and cx + fh * 0.45 <= x + w
+            and y <= cy - fh * 0.6 and cy + fh * 0.7 <= y + h)
+
+
 def _wide_contains(people: list[Person], crop, src_w: int, src_h: int) -> bool:
     """Only use the centered wide view when it contains the visible faces."""
     x, y, w, h = crop
@@ -573,9 +586,9 @@ def plan_crop(src: Path, width: int, height: int, words: list[Word]) -> Plan | N
         shot = [(t, faces) for t, faces in samples if start <= t < end]
         people = _people(shot)
         if not people:
-            # Crop mode always fills the output. Never silently switch it to fit.
-            _append_segment(segments, Segment(start, (src_w - base_w) // 4 * 2,
-                                             (src_h - base_h) // 4 * 2, base_w, base_h))
+            # No face to follow: a blind centre crop lands on a guitar or an empty
+            # chair, so keep the whole shot on a blurred backdrop instead.
+            _append_segment(segments, Segment(start, 0, 0, src_w, src_h, fit=True))
             continue
         for p in people:
             p.track = [(t, jaw, _speaking(words, t), fh, cy) for t, jaw, _, fh, cy in p.track]
@@ -611,8 +624,11 @@ def plan_crop(src: Path, width: int, height: int, words: list[Word]) -> Plan | N
             if who not in visible:
                 if visible:
                     who = max(visible, key=lambda j: _motion(people[j].track))
-                # With transient detection gaps keep this shot's known subject.
-                # The crop remains focused instead of adding blurred letterboxing.
+                # With transient detection gaps keep this shot's known subject, but a
+                # subject never seen around this moment gets the whole shot instead.
+                if not visible and not any(t0 - CONFIRM <= s[0] <= t1 + CONFIRM for s in people[who].track):
+                    _append_segment(segments, Segment(round(t0, 3), 0, 0, src_w, src_h, fit=True))
+                    continue
             mode = next(mode for at, mode in reversed(layouts) if at <= t0)
             # Rank partners over the camera shot, not each quality window: small
             # confidence changes must not alternate listeners in the same layout.
@@ -639,6 +655,13 @@ def plan_crop(src: Path, width: int, height: int, words: list[Word]) -> Plan | N
                 if others and mode == "group":
                     selected.append(max(others, key=lambda j: (
                         _motion(people[j].track), float(np.median([s[3] for s in people[j].track])))))
+            if len(selected) >= 2:
+                # Every stacked panel has to frame a face; drop the ones that do not.
+                count = len(selected)
+                good = [j for j in selected if _face_inside(
+                    people[j], panel_crops[count][j], src_w, src_h, t0, t1)] if panel_crops else selected
+                if len(good) != count:
+                    selected = good if len(good) >= 2 and who in good else [who]
             if mode == "wide" and len(visible) >= 2 and _wide_contains([people[j] for j in visible], wide_crop, src_w, src_h):
                 composition = ("wide", tuple(visible))
             elif mode != "single" and len(selected) >= 2:
@@ -660,7 +683,11 @@ def plan_crop(src: Path, width: int, height: int, words: list[Word]) -> Plan | N
                 segment = Segment(round(t0, 3), *crops[0], secondary=crops[1],
                                   tertiary=crops[2] if len(crops) == 3 else None)
             else:
-                segment = Segment(round(t0, 3), *single_crops[ids[0]])
+                crop = single_crops[ids[0]]
+                if _face_inside(people[ids[0]], crop, src_w, src_h, t0, t1):
+                    segment = Segment(round(t0, 3), *crop)
+                else:
+                    segment = Segment(round(t0, 3), 0, 0, src_w, src_h, fit=True)
             _append_segment(segments, segment)
     if not segments:
         segments = [Segment(0.0, (src_w - base_w) // 4 * 2,

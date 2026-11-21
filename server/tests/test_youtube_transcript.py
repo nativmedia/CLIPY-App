@@ -94,6 +94,23 @@ class YouTubeTranscriptTests(unittest.TestCase):
         self.assertEqual(words[0].text, 'Halo dunia.')
         self.assertEqual(ydl.urlopen.call_count, 1)
 
+    def test_clipping_prefers_word_timing_in_the_same_language(self):
+        coarse = payload([{'tStartMs': 1000, 'dDurationMs': 2000,
+                           'segs': [{'utf8': 'Halo dunia.'}]}])
+        precise = payload([{'tStartMs': 1000, 'dDurationMs': 2000,
+                            'segs': [{'utf8': 'Halo'}, {'utf8': ' dunia.', 'tOffsetMs': 350}]}])
+        def track(name):
+            return [{'ext': 'json3', 'url': f'https://www.youtube.com/api/timedtext?{name}'}]
+        info = {'duration': 10, 'subtitles': {'id': track('manual')},
+                'automatic_captions': {'en-orig': track('english'), 'id-orig': track('indonesian')}}
+        with patch.object(youtube_transcript.yt_dlp, 'YoutubeDL') as client:
+            open_url = client.return_value.__enter__.return_value.urlopen
+            open_url.side_effect = [io.BytesIO(coarse), io.BytesIO(precise)]
+            words, origin, language, _, timing = youtube_transcript.fetch(info, prefer_word_timing=True)
+        self.assertEqual((origin, language, timing), ('youtube_auto', 'id', 'kata'))
+        self.assertEqual([word.start for word in words], [1, 1.35])
+        self.assertTrue(open_url.call_args.args[0].endswith('indonesian'))
+
     def test_unavailable_captions_explain_fallback(self):
         with patch.object(youtube_transcript.yt_dlp, 'YoutubeDL'):
             result = youtube_transcript.fetch({'duration': 10})

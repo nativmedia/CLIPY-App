@@ -1,7 +1,7 @@
 import { el } from "./editor";
 
 /** The native select still owns the value and validation used by the form. */
-export function previewSelect(select: HTMLSelectElement, group: string) {
+export function previewSelect(select: HTMLSelectElement, group: "title-style" | "brand-style") {
   const field = select.parentElement!;
   const label = field.querySelector("span")!;
   select.hidden = true;
@@ -12,13 +12,10 @@ export function previewSelect(select: HTMLSelectElement, group: string) {
   trigger.setAttribute("aria-controls", list.id);
   trigger.setAttribute("aria-haspopup", "listbox");
   field.classList.add("preview-pick");
-  if (group === "font") field.classList.add("font-pick");
-  if (group === "font-weight") field.classList.add("font-weight-pick");
   select.after(trigger, list);
 
   const sync = () => {
     trigger.textContent = select.selectedOptions[0]?.text ?? "choose";
-    if (group === "font") trigger.dataset.font = select.value;
     trigger.disabled = select.disabled;
     trigger.title = select.title;
     field.classList.toggle("is-disabled", select.disabled);
@@ -39,14 +36,12 @@ export function previewSelect(select: HTMLSelectElement, group: string) {
     const options = Array.from(select.options).filter((option) => !option.disabled && !option.hidden);
     if (!options.length) return;
     const buttons = options.map((option) => {
-      const styledName = !["font", "font-weight"].includes(group) && option.value !== "none" && !option.value.startsWith("word-");
+      const styledName = option.value !== "none";
       const button = el("button", { type: "button", className: "option-preview" },
         styledName ? null : el("span", { textContent: option.text }),
         styledName ? el("img", { src: `/option-previews/${group}-${encodeURIComponent(option.value)}.webp`, alt: "", width: 160, height: 44 }) : null,
       );
       if (styledName) button.setAttribute("aria-label", option.text);
-      if (group === "font") button.dataset.font = option.value;
-      if (group === "font-weight") button.dataset.fontWeight = option.value;
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(option.selected));
       button.tabIndex = -1;

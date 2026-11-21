@@ -8,15 +8,17 @@ from . import projects
 
 
 def main() -> None:
-    directory, project_id, *retry = sys.argv[1:]
+    directory, project_id, *task = sys.argv[1:]
     projects.DATA_DIR = Path(directory)
     projects._load()
     p = projects.get(project_id)
     if p is None:
         raise FileNotFoundError(project_id)
     try:
-        if retry:
-            projects._retry(p, int(retry[0]))
+        if task[:1] == ["more"]:
+            projects._more(p, int(task[1]))
+        elif task:
+            projects._retry(p, int(task[0]))
         else:
             projects._run(p)
     except Exception as e:

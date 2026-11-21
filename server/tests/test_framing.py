@@ -256,14 +256,14 @@ class FramingTests(unittest.TestCase):
         self.assertFalse(plan.at(4).fit)
         self.assertEqual(plan.at(0).x, plan.at(4).x)
 
-    def test_no_faces_at_camera_cut_still_fills_frame(self):
+    def test_no_faces_at_camera_cut_keeps_whole_shot(self):
+        # A blind centre crop lands on a guitar or an empty chair; show the whole shot.
         plan = self.plan(self.samples(second=False, lose_focus=True), cuts=(3,))
-        self.assertFalse(plan.at(3).fit)
-        self.assertAlmostEqual(plan.at(3).w / plan.at(3).h, 9 / 16, delta=0.01)
+        self.assertTrue(plan.at(3).fit)
 
-    def test_no_detections_never_enables_fit_in_crop_mode(self):
+    def test_no_detections_keeps_whole_shot_instead_of_blind_crop(self):
         plan = self.plan([(n / 6, []) for n in range(36)])
-        self.assertTrue(all(not s.fit for s in plan.segments))
+        self.assertTrue(all(s.fit for s in plan.segments))
 
     def test_single_speaker(self):
         plan = self.plan(self.samples(second=False))

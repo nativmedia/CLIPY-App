@@ -103,7 +103,7 @@ def caption_composition(folder, words, style, width, height, duration, *, stacke
     font_weight = captions.font_weight_value(font, style.font_weight)
     body, cues = [], []
     outline = 0
-    for ci, cue in enumerate(captions._caption_cues(words, style, width, height)):
+    for ci, cue in enumerate(captions._caption_cues(words, style, width, height, face=font, weight=style.font_weight)):
         if cue.start >= duration:
             continue
         size = cue.size
@@ -119,7 +119,7 @@ def caption_composition(folder, words, style, width, height, duration, *, stacke
         markup = []
         for ri, row in enumerate(cue.rows):
             x = (width - sum(item[2] for item in row) - (len(row) - 1) * cue.space) / 2
-            for wi, (word, text, advance) in enumerate(row):
+            for wi, (word, text, advance, *_) in enumerate(row):
                 ident = f"word-{ci}-{ri}-{wi}"
                 start = max(cue.start, word.start, 0)
                 end = min(cue.end, next_time.get(id(word), cue.end), duration)

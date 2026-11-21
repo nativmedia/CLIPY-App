@@ -1,7 +1,6 @@
 """Run CUDA inference in a separate process so native failures can fall back."""
 import json
 import sys
-from dataclasses import asdict
 
 
 def emit(event):
@@ -16,12 +15,14 @@ def main():
     try:
         def progress(value):
             emit({'type': 'heartbeat'} if value is None else {'type': 'progress', 'value': value})
-        if dev == 'vulkan':
-            from . import whisper_vulkan
-            words, detected = whisper_vulkan.transcribe(audio, language or None, progress, int(sys.argv[4]), sys.argv[5])
-        else:
-            words, detected = transcribe._transcribe_direct(audio, language or None, progress, dev=dev)
-        emit({'type': 'done', 'words': [asdict(word) for word in words], 'language': detected})
+        with transcribe.audio_for_alignment(audio) as (speech, offset):
+            if dev == 'vulkan':
+                from . import whisper_vulkan
+                words, detected = whisper_vulkan.transcribe(speech, language or None, progress, int(sys.argv[4]), sys.argv[5])
+            else:
+                words, detected = transcribe._transcribe_direct(speech, language or None, progress, dev=dev)
+        emit({'type': 'done', 'words': [{'text': word.text, 'start': word.start + offset, 'end': word.end + offset}
+                                        for word in words], 'language': detected})
     except Exception as exc:
         message = str(exc).lower()
         reason = (str(exc) if dev == 'vulkan' else

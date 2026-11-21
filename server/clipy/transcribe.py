@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .captions import Word
@@ -85,6 +86,44 @@ def load_wav(path: str) -> np.ndarray:
             raise ValueError(f"{path}: expected 16 kHz mono 16-bit WAV")
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
     return pcm.astype(np.float32) / 32768.0
+
+
+@contextmanager
+def audio_for_alignment(path: str):
+    """Skip a quiet lead-in for inference and return its exact sample offset."""
+    with wave.open(path, "rb") as source:
+        if source.getnchannels() != 1 or source.getsampwidth() != 2:
+            yield path, 0.0
+            return
+        rate = source.getframerate()
+        window = rate // 100
+        quiet_rms = 80  # PCM units, about -52 dBFS.
+        first_sample = 0
+        while batch := source.readframes(window * 100):
+            samples = np.frombuffer(batch, dtype="<i2").astype(np.float32)
+            # Measure short windows so codec noise and isolated low-level peaks
+            # in the lead-in do not look like the start of speech.
+            padded = np.pad(samples, (0, -len(samples) % window))
+            frames = padded.reshape(-1, window)
+            active = np.flatnonzero(np.mean(frames ** 2, axis=1) > quiet_rms ** 2)
+            if active.size:
+                block = int(active[0])
+                onset = int(np.flatnonzero(np.abs(frames[block]) > quiet_rms)[0])
+                first_sample += block * window + onset
+                if first_sample < rate * .2:
+                    break
+                start = first_sample - window  # Keep 10 ms of context.
+                source.setpos(start)
+                with tempfile.TemporaryDirectory(prefix="clipy-align-") as folder:
+                    aligned = Path(folder) / "speech.wav"
+                    with wave.open(str(aligned), "wb") as output:
+                        output.setparams(source.getparams())
+                        while chunk := source.readframes(rate):
+                            output.writeframesraw(chunk)
+                    yield str(aligned), start / rate
+                return
+            first_sample += len(samples)
+    yield path, 0.0
 
 
 def _transcribe_direct(audio_path: str, language: str | None = None, on_progress=None, *, dev: str) -> tuple[list[Word], str]:

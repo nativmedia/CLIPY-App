@@ -209,7 +209,7 @@ BASE_URLS = {
 
 # ---------- asking for JSON ----------
 
-def ask_json(system: str, user: str, schema: dict) -> dict:
+def ask_json(system: str, user: str, schema: dict, *, effort: str = "high", max_tokens: int = 16000) -> dict:
     """Send one prompt to whichever provider the stored key belongs to; return parsed JSON."""
     data = load()
     if not data:
@@ -220,11 +220,11 @@ def ask_json(system: str, user: str, schema: dict) -> dict:
         client = anthropic.Anthropic(api_key=key)
         response = client.beta.messages.create(
             model=model,
-            max_tokens=16000,
+            max_tokens=max_tokens,
             # A policy decline is re-run on Anthropic's recommended fallback model.
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
-            output_config={"effort": "high", "format": {"type": "json_schema", "schema": schema}},
+            output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
             system=system,
             messages=[{"role": "user", "content": user}],
         )

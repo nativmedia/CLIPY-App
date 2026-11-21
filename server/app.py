@@ -14,6 +14,9 @@ CLIPY.ID API.
     GET    /api/projects/{id}                one project
     GET    /api/projects/{id}/files/{name}   generated clip assets
     POST   /api/projects/{id}/clips/{n}/retry
+    GET    /api/projects/{id}/clips/{n}/edit
+    POST   /api/projects/{id}/clips/{n}/edit
+    POST   /api/projects/{id}/more      JSON {count}: gen more clips from the saved transcript
     GET    /api/projects/{id}/posts          titles/descriptions per clip and platform
     PUT    /api/projects/{id}/posts  {posts} save edits
 
@@ -73,14 +76,13 @@ class ClipSettings(BaseModel):
 
 
 class CaptionSettings(BaseModel):
-    font_weight: str = Field(default="regular", pattern="^(thin|regular|bold|extra-bold)$")
-    font: str
-    animation: str
+    animation: str = captions.DEFAULT_ANIMATION
+    font: str = captions.DEFAULT_FONT
     position: int | None = Field(default=None, ge=1, le=7)
     display: str | None = Field(default=None, pattern="^(word|sentence)$")
     max_lines: int = Field(default=2, ge=1, le=3)
     color: str = captions.DEFAULT_COLOR
-    case: str
+    case: str = "sentence"
 
 
 class ThumbSettings(BaseModel):
@@ -393,8 +395,14 @@ async def create_project(
     c, t = s.caption, s.thumb
     if s.mode == "filming" and (not s.film or s.film.voice not in tts.VOICES):
         raise HTTPException(400, "choose valid filming settings and a narrator voice")
-    if c.font not in captions.FONTS or (c.animation not in captions.ANIMATIONS and c.animation != "word") or c.color not in captions.COLORS or c.case not in captions.CASES:
+    if ((c.animation not in captions.ANIMATIONS and c.animation not in captions.ANIMATION_ALIASES)
+            or c.color not in captions.COLORS or c.case not in captions.CASES
+            or (c.font not in captions.CAPTION_FONTS and c.font not in captions.FONT_ALIASES)):
         raise HTTPException(400, "unknown caption option")
+    c.font = captions.normalize_font(c.font)
+    if c.animation == "word" and c.display is None:
+        c.display = "word"
+    c.animation = captions.normalize_animation(c.animation)
     if t.title_style not in thumbs.TITLE_STYLES or (t.voice and t.voice not in tts.VOICES):
         raise HTTPException(400, "unknown thumbnail option")
     if t.source == "upload" and not image:
@@ -490,6 +498,86 @@ def retry_clip(project_id: str, n: int):
         raise HTTPException(409, "this project can't retry clips right now")
     try:
         projects.retry(p, n)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+    return p.public()
+
+
+class CaptionFix(BaseModel):
+    start: float
+    end: float
+    text: str = Field(default="", max_length=600)
+    orig: str = Field(default="", max_length=600)
+    kind: str | None = Field(default=None, pattern="^(word|line)$")
+
+
+class EditRequest(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    fixes: list[CaptionFix] = Field(default_factory=list, max_length=2000)
+
+
+def _editable_clip(project_id: str, n: int):
+    p = projects.get(project_id)
+    if not p or not any(c["n"] == n for c in p.clips):
+        raise HTTPException(404, "no such clip")
+    if p.settings.get("mode", "clipping") == "filming" or not (p.dir / "words.json").exists():
+        raise HTTPException(409, "Clip ini tidak bisa diedit")
+    return p
+
+
+@app.get("/api/projects/{project_id}/clips/{n}/edit")
+def clip_edit_info(project_id: str, n: int):
+    """Range, limits and nearby transcript words for the clip editor."""
+    return projects.edit_info(_editable_clip(project_id, n), n)
+
+
+@app.post("/api/projects/{project_id}/clips/{n}/edit/preview")
+def clip_edit_preview(project_id: str, n: int):
+    """Prepare a light video of the editable window for live preview."""
+    p = _editable_clip(project_id, n)
+    try:
+        return projects.edit_preview(p, n)
+    except Exception as e:  # noqa: BLE001 - preview is optional; the editor falls back
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(502, f"Preview tidak bisa disiapkan: {e or e.__class__.__name__}") from e
+
+
+@app.get("/api/projects/{project_id}/clips/{n}/edit/preview.mp4")
+def clip_edit_preview_file(project_id: str, n: int):
+    p = _editable_clip(project_id, n)
+    path = projects.edit_preview_file(p, n)
+    if not path:
+        raise HTTPException(404, "preview not ready")
+    return FileResponse(path, media_type="video/mp4")
+
+
+@app.post("/api/projects/{project_id}/clips/{n}/edit")
+def edit_clip(project_id: str, n: int, body: EditRequest):
+    """Save a new clip range and per-word caption fixes, then re-render the clip."""
+    p = _editable_clip(project_id, n)
+    try:
+        projects.edit(p, n, body.start, body.end, [f.model_dump() for f in body.fixes])
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+    return p.public()
+
+
+class MoreRequest(BaseModel):
+    count: int = Field(ge=1, le=projects.MORE_LIMIT)
+
+
+@app.post("/api/projects/{project_id}/more")
+def more_clips(project_id: str, body: MoreRequest):
+    """Add clips to a finished project from its saved transcript ("gen more")."""
+    p = projects.get(project_id)
+    if not p:
+        raise HTTPException(404, "project not found")
+    if not keys.load():
+        raise HTTPException(400, "insert an API key first")
+    try:
+        projects.more(p, body.count)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return p.public()

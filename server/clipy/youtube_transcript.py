@@ -201,7 +201,7 @@ def _languages(tracks: dict, language: str | None, automatic: bool) -> list[str]
     return list(dict.fromkeys(k for k in preferred if k in tracks))
 
 
-def fetch(info: dict) -> tuple[list[Word] | None, str | None, str | None, str, str | None]:
+def fetch(info: dict, *, prefer_word_timing: bool = False) -> tuple[list[Word] | None, str | None, str | None, str, str | None]:
     """Return words, origin, language and a safe user-facing fallback reason."""
     duration = float(info.get('duration') or 0)
     if not math.isfinite(duration) or duration <= 0:
@@ -209,6 +209,7 @@ def fetch(info: dict) -> tuple[list[Word] | None, str | None, str | None, str, s
     attempted = False
     invalid = False
     failed = False
+    fallback = None
     deadline = time.monotonic() + 60
     opts = {'quiet': True, 'no_warnings': True, 'socket_timeout': 10, 'retries': 0}
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -216,11 +217,16 @@ def fetch(info: dict) -> tuple[list[Word] | None, str | None, str | None, str, s
                                        ('automatic_captions', 'youtube_auto', True)):
             tracks = info.get(key) or {}
             for language in _languages(tracks, info.get('language'), automatic):
+                caption_language = language.removesuffix('-orig')
+                if fallback and caption_language != fallback[2]:
+                    continue
                 ordered = sorted(tracks.get(language, []), key=lambda t: {'json3': 0, 'srt': 1, 'vtt': 2}.get(t.get('ext'), 3))
                 for track in ordered:
                     if time.monotonic() >= deadline:
-                        return None, None, None, 'Pemeriksaan subtitle YouTube melewati batas waktu.', None
+                        return fallback or (None, None, None, 'Pemeriksaan subtitle YouTube melewati batas waktu.', None)
                     if track.get('ext') not in ('json3', 'srt', 'vtt') or not track.get('url'):
+                        continue
+                    if fallback and track.get('ext') != 'json3':
                         continue
                     parsed = urlsplit(track['url'])
                     host = (parsed.hostname or '').lower()
@@ -233,11 +239,17 @@ def fetch(info: dict) -> tuple[list[Word] | None, str | None, str | None, str, s
                             data = response.read(MAX_BYTES + 1)
                         words, precision = (parse_json3(data, duration) if track.get('ext') == 'json3'
                                             else parse_cues(data, duration))
-                        return words, origin, language.removesuffix('-orig'), '', precision
+                        result = (words, origin, caption_language, '', precision)
+                        if precision == 'kata' or not prefer_word_timing:
+                            return result
+                        if fallback is None:
+                            fallback = result
                     except (ValueError, TypeError, KeyError, UnicodeError):
                         invalid = True
                     except Exception:
                         failed = True
+    if fallback:
+        return fallback
     reason = ('Subtitle YouTube tidak dapat dibaca.' if invalid else
               'Subtitle YouTube gagal diambil.' if failed or attempted else
               'Subtitle YouTube tidak tersedia.')

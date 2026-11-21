@@ -124,7 +124,7 @@
 
         <div class="step" id="step-film">
           <div class="step-inner">
-            <p class="kicker"><span>filming</span></p>
+            <p class="kicker num"><span>filming</span></p>
             <div class="row cols-4">
               <label class="pick"><select id="film-ratio" required><option value="16:9">16:9</option><option value="4:3">4:3</option><option value="1:1">1:1</option><option value="4:5">4:5</option><option value="9:16" selected>9:16</option></select><span>ratio clip</span></label>
               <label class="pick" id="film-background-pick"><select id="film-background" required><option value="none">no background</option><option value="black">hitam</option><option value="white">putih</option><option value="blur">blur</option></select><span>background</span></label>
@@ -152,77 +152,72 @@
           </div>
         </div>
 
-        <div class="step" id="step-objective">
+        <!-- Settings run from what shapes the clips most to what is optional. -->
+        <div class="step" id="step-clip">
           <div class="step-inner">
-            <label class="pick film-prompt"><textarea class="text-pick" id="clip-objective" maxlength="2000" rows="1" placeholder="Contoh: fokus pada tips praktis dan hindari bagian promosi"></textarea><span>instruksi hasil (opsional)</span></label>
+            <p class="kicker num"><span>hasil clip</span></p>
+            <div class="row cols-4">
+              <label class="pick"><select id="opt-count" required></select><span>output clips</span></label>
+              <label class="pick"><select id="opt-duration" required></select><span>duration</span></label>
+              <label class="pick"><select id="opt-ratio" required></select><span>ratio clip</span></label>
+              <label class="pick"><select id="opt-background" required><option value="none">no background</option><option value="black">hitam</option><option value="white">putih</option><option value="blur">blur</option></select><span>background</span></label>
+            </div>
           </div>
         </div>
 
-        <div class="step" id="step-clip">
+        <div class="step" id="step-objective">
           <div class="step-inner">
-            <p class="kicker"><span>clip</span></p>
-            <div class="row cols-4">
-              <label class="pick"><select id="opt-ratio" required></select><span>ratio clip</span></label>
-              <label class="pick"><select id="opt-background" required><option value="none">no background</option><option value="black">hitam</option><option value="white">putih</option><option value="blur">blur</option></select><span>background</span></label>
-              <label class="pick"><select id="opt-duration" required></select><span>duration</span></label>
-              <label class="pick"><select id="opt-count" required></select><span>output clips</span></label>
-            </div>
+            <p class="kicker num"><span>fokus konten</span><span class="optional">opsional</span></p>
+            <label class="pick film-prompt"><textarea class="text-pick" id="clip-objective" maxlength="2000" rows="1" placeholder="Contoh: fokus pada tips praktis dan hindari bagian promosi"></textarea><span>instruksi hasil (opsional)</span></label>
           </div>
         </div>
 
         <div class="step" id="step-caption">
           <div class="step-inner">
-            <p class="kicker"><span>PRESETS</span></p>
-            <div class="row cols-3">
-              <label class="pick"><select id="video-preset"><option value="">Manual</option><option value="viral">Viral highlight</option><option value="podcast">Podcast clean</option><option value="karaoke">Karaoke warna</option><option value="box">Bold word box</option><option value="cinematic">Cerita sinematik</option><option value="edukasi">Edukasi tegas</option><option value="neon">Neon gaming</option><option value="minimal">Minimal bersih</option></select><span>preset video</span></label>
+            <p class="kicker num"><span>caption</span></p>
+            <div class="caption-controls" id="caption-styles">
+              <label class="pick"><select id="caption-preset" required></select><span>caption presets</span></label>
+              <label class="pick"><select id="caption-font" required></select><span>caption font</span></label>
+              <div class="caption-demo">
+                <span class="caption-demo-label" aria-hidden="true"><b id="caption-style-name">clean</b></span>
+                <div class="caption-style-preview" id="caption-style-preview" data-style="clean" data-display="sentence" data-case="sentence" data-playing="false" aria-hidden="true">
+                  <span class="caption-style-words"><span id="caption-style-context">Biar lebih </span><strong id="caption-style-accent">jelas</strong></span>
+                </div>
+                <button type="button" class="caption-style-replay" id="caption-style-replay" aria-label="Putar pratinjau caption" title="Putar pratinjau caption"></button>
+                <span class="caption-demo-meta" id="caption-style-meta" aria-hidden="true"></span>
+              </div>
             </div>
             <p class="hint" id="preset-hint" aria-live="polite"></p>
-            <p class="kicker caption-kicker"><span>auto caption</span></p>
-            <div class="row cols-4">
+            <p class="caption-style-status" id="caption-style-status" role="status" hidden>Mesin caption masih versi lama. Muat ulang server CLIPY.ID agar pratinjau dan hasil render sesuai.</p>
+            <div class="row caption-detail-row">
               <label class="pick"><select id="opt-caption-mode" required><option value="word">per kata</option><option value="sentence" selected>per kalimat</option></select><span>tampilan caption</span></label>
-              <label class="pick"><select id="opt-animation" required></select><span id="caption-animation-label">animasi per kalimat</span></label>
-              <label class="pick" id="caption-lines-pick"><select id="opt-caption-lines" required><option value="1">1 baris</option><option value="2" selected>2 baris</option><option value="3">3 baris</option></select><span>maksimal baris</span></label>
               <label class="pick"><select id="opt-caption-position" required><option value="1">paling atas</option><option value="2">atas</option><option value="3">atas tengah</option><option value="4">tengah</option><option value="5">bawah tengah</option><option value="6" selected>bawah</option><option value="7">paling bawah</option></select><span>posisi caption</span></label>
-              <div class="pick"><select id="opt-font" required></select><span>font</span></div>
-              <div class="pick"><select id="opt-caption-weight" required><option value="thin">Thin</option><option value="regular">Regular</option><option value="bold" selected>Bold</option><option value="extra-bold">Extra Bold</option></select><span>font weight</span></div>
-              <label class="pick"><select id="opt-case" required></select><span>letter case</span></label>
-              <div class="pick"><div class="swatches" id="opt-color" role="radiogroup" aria-required="true" aria-label="color"></div><span>color</span></div>
+              <label class="pick"><select id="opt-case" required></select><span>format huruf</span></label>
+              <div class="pick caption-colors"><div class="swatches" id="opt-color" role="radiogroup" aria-required="true" aria-label="Warna sorotan"></div><span>warna sorotan</span></div>
             </div>
           </div>
         </div>
 
         <div class="step" id="step-thumb">
           <div class="step-inner">
-            <p class="kicker"><span>thumbnail</span></p>
+            <p class="kicker num"><span>judul &amp; thumbnail</span></p>
             <div class="row brand-row">
+              <div class="pick"><label for="opt-thumb-text-mode" class="sr-only">teks</label><select id="opt-thumb-text-mode"><option value="auto">auto</option><option value="manual">tulis judul</option><option value="none">no title</option></select><span>teks</span><input class="text-pick" id="opt-thumb-text" type="text" maxlength="120" placeholder="tulis judul" aria-label="tulis judul thumbnail" hidden /></div>
+              <div class="pick"><select id="opt-title-style" required></select><span>gaya judul</span></div>
               <div class="pick">
                 <select id="opt-source" required></select>
                 <input id="opt-image" type="file" accept="image/jpeg,image/png,image/webp" hidden />
                 <button type="button" class="link file-pick" id="opt-image-pick" hidden>choose image</button>
                 <span>image</span>
               </div>
-              <div class="pick"><label for="opt-thumb-text-mode" class="sr-only">teks</label><select id="opt-thumb-text-mode"><option value="auto">auto</option><option value="manual">tulis judul</option><option value="none">no title</option></select><span>teks</span><input class="text-pick" id="opt-thumb-text" type="text" maxlength="120" placeholder="tulis judul" aria-label="tulis judul thumbnail" hidden /></div>
               <div class="pick frame-pick"><div class="frame" id="opt-thumb-position" role="group" aria-label="Posisi teks thumbnail"></div><span>position</span></div>
-              <div class="pick"><select id="opt-title-style" required></select><span>title on thumbnail</span></div>
               <label class="pick"><select id="opt-thumb-number"><option value="off">tanpa urutan</option><option value="number">1, 2, 3…</option><option value="letter">A, B, C…</option><option value="episode">Ep. 1, Ep. 2, Ep. 3…</option><option value="part">Part 1, Part 2, Part 3…</option><option value="clip">Klip 1, Klip 2, Klip 3…</option></select><span>urutan thumbnail tiap klip</span></label>
               <label class="pick" id="thumb-dubbing"><select id="opt-voice" required></select><span>Voice Over Judul</span></label>
             </div>
 
-            <p class="kicker branding-kicker"><span>background music</span></p>
-            <div class="music-row">
-              <div class="pick music-field">
-                <label class="sr-only" for="opt-music-url">tautan musik</label>
-                <input id="opt-music-url" class="text-pick" type="url" inputmode="url" placeholder="tempel tautan musik" />
-                <input id="opt-music" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.flac" hidden />
-                <div class="music-links"><button type="button" class="text-button" id="opt-music-pick">pilih musik</button><span id="opt-music-name"></span><button type="button" class="text-button" id="opt-music-remove" hidden>hapus</button></div>
-              </div>
-              <div class="music-output">
-                <div class="music-preview" id="music-preview" hidden><button type="button" id="music-play" aria-label="Putar musik">▶</button><div class="music-wave-wrap"><canvas id="music-wave" width="560" height="44" aria-label="Gelombang musik"></canvas><div id="music-selection" class="music-selection" hidden></div><input id="music-start" type="range" min="0" max="0" value="0" step="0.1" aria-label="Awal potongan musik" disabled /><span id="music-times" class="music-times"></span></div><audio id="music-audio" preload="metadata"></audio></div>
-                <span id="music-error" role="status"></span>
-              </div>
-            </div>
-            <p class="kicker branding-kicker"><span>branding</span></p>
-            <div class="row brand-row">
+            <details class="optional-section" id="section-branding">
+              <summary class="kicker num"><span>branding</span><span class="optional">opsional</span></summary>
+              <div class="row brand-row">
               <div class="pick">
                 <input id="opt-logo" type="file" accept="image/png,image/webp,image/jpeg" hidden />
                 <button type="button" class="logo-pick" id="opt-logo-pick">
@@ -242,11 +237,29 @@
               <div class="pick"><select id="opt-brand-style"></select><span>text style</span></div>
               <label class="pick"><select id="opt-brand-opacity"></select><span>opacity</span></label>
             </div>
+            </details>
+
+            <details class="optional-section" id="section-music">
+              <summary class="kicker num"><span>musik latar</span><span class="optional">opsional</span></summary>
+              <div class="music-row">
+              <div class="pick music-field">
+                <label class="sr-only" for="opt-music-url">tautan musik</label>
+                <input id="opt-music-url" class="text-pick" type="url" inputmode="url" placeholder="tempel tautan musik" />
+                <input id="opt-music" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.flac" hidden />
+                <div class="music-links"><button type="button" class="text-button" id="opt-music-pick">pilih musik</button><span id="opt-music-name"></span><button type="button" class="text-button" id="opt-music-remove" hidden>hapus</button></div>
+              </div>
+              <div class="music-output">
+                <div class="music-preview" id="music-preview" hidden><button type="button" id="music-play" aria-label="Putar musik">▶</button><div class="music-wave-wrap"><canvas id="music-wave" width="560" height="44" aria-label="Gelombang musik"></canvas><div id="music-selection" class="music-selection" hidden></div><input id="music-start" type="range" min="0" max="0" value="0" step="0.1" aria-label="Awal potongan musik" disabled /><span id="music-times" class="music-times"></span></div><audio id="music-audio" preload="metadata"></audio></div>
+                <span id="music-error" role="status"></span>
+              </div>
+            </div>
+            </details>
           </div>
         </div>
 
         <div class="step" id="step-start">
           <div class="step-inner start">
+            <p class="settings-summary" id="settings-summary" aria-live="polite"></p>
             <div class="start-row">
               <button type="button" class="blocks" id="start" aria-label="START" aria-disabled="true" aria-describedby="start-requirements"></button>
               <button type="button" class="blocks" id="new-clip" aria-label="NEW CLIPY" hidden></button>

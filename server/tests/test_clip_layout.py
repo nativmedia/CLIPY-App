@@ -1,15 +1,78 @@
+import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from PIL import Image
 from clipy import captions
 from app import ClipSettings
-from clipy import film, media
+from clipy import film, media, projects
 from clipy.framing import Plan, Segment
 
 class ClipLayoutTests(unittest.TestCase):
+    def test_multiple_crop_segments_keep_the_variable_frame_rate_timeline(self):
+        source = ("color=black:s=160x120:r=30:d=2,"
+                  "select='eq(n,0)+eq(n,1)+eq(n,10)+eq(n,12)+eq(n,20)+"
+                  "eq(n,29)+eq(n,31)+eq(n,36)+eq(n,46)+eq(n,57)'")
+        plan = Plan([Segment(start, 0, 0, 160, 120) for start in (0, .145, .955, 1.435)])
+
+        def timestamps(graph):
+            result = subprocess.run(['ffmpeg', '-hide_banner', '-f', 'lavfi', '-i', source,
+                                     '-filter_complex', f'{graph};[r]showinfo[v]', '-map', '[v]',
+                                     '-f', 'null', '-'], check=True, capture_output=True, text=True)
+            return re.findall(r'pts_time:\s*([.\d]+)', result.stderr)
+
+        expected = timestamps(f'[0:v]fps={media.FPS}[r]')
+        self.assertGreater(len(expected), 57)
+        self.assertEqual(timestamps(media.reframe(160, 120, 'crop', plan)), expected)
+
+    def test_low_fps_clip_caption_matches_downloaded_subtitles_after_intro(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            source, voice = folder / 'src_1.mp4', folder / 'voice.wav'
+            subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i',
+                            'color=black:s=160x120:r=5:d=1', '-f', 'lavfi', '-i',
+                            "aevalsrc='0.16*sin(2*PI*if(between(t,0.36,0.64),225,130)*t)':s=16000:d=1",
+                            '-c:v', 'libx264',
+                            '-c:a', 'aac', '-shortest', str(source)], check=True)
+            subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i',
+                            'sine=frequency=440:duration=0.34', str(voice)], check=True)
+            style = captions.CaptionStyle(animation='focus', display='sentence', color='yellow', case='sentence')
+            project = SimpleNamespace(dir=folder, settings={}, transcript_timing='segmen', save=lambda: None,
+                                      clip_asset_path=lambda clip, extension: folder / f'clip.{extension}')
+            clip = {'n': 1, 'start': 13, 'end': 14, 'title': 'Halo'}
+            options = {'width': 160, 'height': 120, 'fit': 'fit', 'style': style, 'dubbing_speed': 1.0,
+                       'brand': None, 'brand_position': 'bc',
+                       'thumb_cfg': {'voice': 'test', 'text_mode': 'none'}}
+            words = [captions.Word('Ini', .1, .32), captions.Word('penting', .38, .61),
+                     captions.Word('sekali', .66, .9)]
+            with patch.object(media, 'video_encoders', return_value=[['-c:v', 'libx264', '-preset', 'ultrafast']]), \
+                    patch('clipy.tts.speak', return_value=voice), \
+                    patch('clipy.laughter.detect', return_value=[]), \
+                    patch('clipy.emphasis.ai_keywords', return_value=None), \
+                    patch('clipy.transcribe.transcribe', return_value=(words, 'id')) as transcribe:
+                projects._make_clip(project, clip, [captions.Word('Terlambat', 13.55, 13.9)], options, 0, 1)
+
+            transcribe.assert_called_once()
+            self.assertAlmostEqual(clip['intro_duration'], 23 / media.FPS)
+            self.assertFalse((folder / 'src_1.caption.wav').exists())
+            raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', str(folder / clip['video']),
+                                  '-pix_fmt', 'gray', '-f', 'rawvideo', '-'],
+                                 check=True, capture_output=True).stdout
+            frame_size = 160 * 120
+            first_caption = next(i for i in range(len(raw) // frame_size)
+                                 if max(raw[i * frame_size:(i + 1) * frame_size]) > 110)
+            self.assertEqual(first_caption, 26)  # 23 intro frames + 3 body frames.
+            self.assertIn('00:00:00,867 -->', (folder / clip['srt']).read_text(encoding='utf-8'))
+            ass = (folder / clip['ass']).read_text(encoding='utf-8')
+            self.assertIn(',0:00:00.87,', ass)
+            accents = [line for line in ass.splitlines() if r'\b800' in line]
+            self.assertTrue(accents)
+            self.assertTrue(all(line.endswith('}penting') for line in accents))
+            self.assertTrue(any(',0:00:01.15,' in line for line in accents))
+
     def test_clip_shape_and_background_are_rendered(self):
         for background in ('black', 'white', 'blur'):
             with self.subTest(background=background):
