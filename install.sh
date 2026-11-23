@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-repository=https://github.com/nativmedia/CLIPY.ID-Client.git
+repository=https://github.com/nativmedia/CLIPY-App.git
+previous_repository=https://github.com/nativmedia/CLIPY.ID-Client.git
 case "$(uname -s)" in
   Darwin) destination="$HOME/Library/Application Support/CLIPY.ID-Client" ;;
   Linux) destination="${XDG_DATA_HOME:-$HOME/.local/share}/CLIPY.ID-Client" ;;
@@ -19,10 +20,15 @@ if [ ! -e "$destination" ]; then
   mkdir -p "$(dirname "$destination")"
   git clone -- "$repository" "$destination"
 else
-  if [ ! -e "$destination/.git" ] || [ "$(git -C "$destination" remote get-url origin 2>/dev/null)" != "$repository" ]; then
+  if [ ! -e "$destination/.git" ] || ! origin=$(git -C "$destination" remote get-url origin 2>/dev/null); then
     printf '%s\n' "Folder $destination sudah digunakan. Gunakan git clone untuk memilih folder lain." >&2
     exit 1
   fi
+  case "$origin" in
+    "$previous_repository") git -C "$destination" remote set-url origin "$repository" ;;
+    "$repository") ;;
+    *) printf '%s\n' "Folder $destination sudah digunakan. Gunakan git clone untuk memilih folder lain." >&2; exit 1 ;;
+  esac
   git -C "$destination" pull --ff-only
 fi
 

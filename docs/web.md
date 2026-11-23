@@ -48,7 +48,7 @@ Jika tidak ada hasil, gunakan build FFmpeg yang menyertakan libass.
 
 ## 1. Salin alamat repository
 
-1. Buka [halaman GitHub CLIPY.ID-Client](https://github.com/nativmedia/CLIPY.ID-Client).
+1. Buka [halaman GitHub CLIPY-App](https://github.com/nativmedia/CLIPY-App).
 2. Tekan tombol hijau **Code** di atas daftar file.
 3. Pilih tab **Local**, lalu pilih **HTTPS** jika belum terpilih.
 4. Tekan ikon **salin** di sebelah alamat yang ditampilkan.
@@ -56,7 +56,7 @@ Jika tidak ada hasil, gunakan build FFmpeg yang menyertakan libass.
 Alamat HTTPS repository ini adalah:
 
 ```text
-https://github.com/nativmedia/CLIPY.ID-Client.git
+https://github.com/nativmedia/CLIPY-App.git
 ```
 
 ## 2. Pilih folder dan jalankan `git clone`
@@ -66,14 +66,14 @@ https://github.com/nativmedia/CLIPY.ID-Client.git
 3. Ketik `git clone`, beri satu spasi, lalu tempel alamat HTTPS yang disalin tadi. Anda juga dapat menyalin perintah lengkap berikut:
 
    ```powershell
-   git clone https://github.com/nativmedia/CLIPY.ID-Client.git
+   git clone https://github.com/nativmedia/CLIPY-App.git
    ```
 
-4. Tekan **Enter** dan tunggu sampai proses selesai. Git akan membuat folder baru bernama **CLIPY.ID-Client** di lokasi yang Anda pilih.
+4. Tekan **Enter** dan tunggu sampai proses selesai. Git akan membuat folder baru bernama **CLIPY-App** di lokasi yang Anda pilih.
 5. Masuk ke folder tersebut dengan perintah:
 
    ```powershell
-   cd .\CLIPY.ID-Client
+   cd .\CLIPY-App
    ```
 
    Lokasi sekarang adalah folder utama aplikasi. Di dalamnya terdapat folder `server` dan `web`. Jika Anda sudah pernah melakukan clone di lokasi ini, gunakan folder yang sudah ada dan ikuti bagian **Memperbarui aplikasi**; tidak perlu melakukan clone ulang.
@@ -82,7 +82,7 @@ https://github.com/nativmedia/CLIPY.ID-Client.git
 
 ## 3. Siapkan server dan model pendukung
 
-Langkah ini dilakukan **sekali saat pemasangan pertama**, dari PowerShell yang sudah berada di folder `CLIPY.ID-Client`.
+Langkah ini dilakukan **sekali saat pemasangan pertama**, dari PowerShell yang sudah berada di folder proyek.
 
 1. Masuk ke folder server:
 
@@ -128,7 +128,7 @@ Jika aplikasi membutuhkan transkripsi lokal, model transkripsi dapat diunduh oto
 
 Server pada langkah sebelumnya harus tetap berjalan. Sekarang buka **jendela PowerShell kedua**:
 
-1. Buka folder **CLIPY.ID-Client** di File Explorer. Klik bilah alamat, ketik `powershell`, lalu tekan **Enter**.
+1. Buka folder proyek di File Explorer. Klik bilah alamat, ketik `powershell`, lalu tekan **Enter**.
 2. Masuk ke folder tampilan web:
 
    ```powershell
@@ -155,7 +155,7 @@ Terminal pertama menjalankan pemrosesan video pada port **4748**. Terminal kedua
 
 ## Membuka kembali setelah komputer dinyalakan
 
-Anda tidak perlu mengulangi `git clone` atau membuat lingkungan Python setiap kali. Buka folder **CLIPY.ID-Client**, lalu:
+Buka folder proyek yang sudah disiapkan, lalu:
 
 1. Buka PowerShell di dalam folder `server` dan jalankan:
 
@@ -178,7 +178,7 @@ Untuk menghentikan aplikasi, pastikan proses video selesai terlebih dahulu, lalu
 Pembaruan dilakukan melalui terminal pada folder yang sudah pernah di-clone:
 
 1. Tunggu seluruh pekerjaan video selesai, lalu hentikan server dan tampilan dengan **Ctrl+C** pada kedua terminal.
-2. Buka folder utama **CLIPY.ID-Client** di File Explorer. Klik bilah alamat, ketik `powershell`, lalu tekan **Enter**.
+2. Buka folder proyek di File Explorer. Klik bilah alamat, ketik `powershell`, lalu tekan **Enter**.
 3. Ambil pembaruan:
 
    ```powershell
@@ -221,7 +221,7 @@ Pada thumbnail yang dibuat berikutnya, pilihan teks otomatis menggunakan judul c
 ## Jika ada kendala
 
 - **`git`, `python`, `node`, `npm.cmd`, `ffmpeg`, atau `ffprobe` tidak dikenali:** pastikan program terkait terpasang, tutup PowerShell, lalu buka lagi. Periksa PATH jika masalah berlanjut.
-- **Tidak menemukan folder `server` atau `web`:** pastikan terminal dibuka di dalam folder `CLIPY.ID-Client`, bukan di folder induknya.
+- Jika `server` atau `web` tidak ditemukan, buka terminal di folder proyek yang berisi kedua folder tersebut.
 - **Alamat 4747 tidak terbuka atau API tidak terhubung:** pastikan kedua terminal masih berjalan dan periksa pesan kesalahan di masing-masing terminal.
 - **Port sudah digunakan:** ada aplikasi lain yang memakai port tersebut. Tutup aplikasi itu jika memang Anda mengenalinya, lalu jalankan kembali CLIPY.ID.
 - **Pemasangan paket atau model gagal:** periksa koneksi internet dan ruang penyimpanan, lalu ulangi perintah yang gagal.

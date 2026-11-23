@@ -18,13 +18,13 @@ Siapkan [prasyarat sistem](#prasyarat) sekali. Perintah di bawah mengambil kode 
 **Windows (PowerShell)**
 
 ```powershell
-irm https://raw.githubusercontent.com/nativmedia/CLIPY.ID-Client/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/nativmedia/CLIPY-App/main/install.ps1 | iex
 ```
 
 **macOS dan Linux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nativmedia/CLIPY.ID-Client/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/nativmedia/CLIPY-App/main/install.sh | sh
 ```
 
 Lokasi kode setelah pemasangan
@@ -38,8 +38,8 @@ Tutup CLIPY.ID sebelum menjalankan ulang perintah instalasi untuk mengambil peru
 ## Jalankan dari kode sumber
 
 ```sh
-git clone https://github.com/nativmedia/CLIPY.ID-Client.git
-cd CLIPY.ID-Client
+git clone https://github.com/nativmedia/CLIPY-App.git
+cd CLIPY-App
 npm ci
 npm run setup
 npm run dev:desktop

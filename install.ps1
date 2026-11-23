@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-$repository = 'https://github.com/nativmedia/CLIPY.ID-Client.git'
+$repository = 'https://github.com/nativmedia/CLIPY-App.git'
+$previousRepository = 'https://github.com/nativmedia/CLIPY.ID-Client.git'
 $destination = Join-Path $env:LOCALAPPDATA 'CLIPY.ID-Client'
 $git = (Get-Command git.exe -ErrorAction Stop).Source
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
@@ -8,14 +9,18 @@ Get-Command cargo.exe -ErrorAction Stop | Out-Null
 
 if (-not (Test-Path -LiteralPath $destination)) {
     & $git clone -- $repository $destination
-    if ($LASTEXITCODE -ne 0) { throw 'Gagal mengambil repo CLIPY.ID-Client.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Gagal mengambil repo CLIPY-App.' }
 } else {
     if (-not (Test-Path -LiteralPath (Join-Path $destination '.git'))) {
         throw "Folder $destination sudah digunakan. Gunakan git clone untuk memilih folder lain."
     }
     $origin = & $git -C $destination remote get-url origin
-    if ($LASTEXITCODE -ne 0 -or $origin -ne $repository) {
+    if ($LASTEXITCODE -ne 0 -or $origin -notin @($repository, $previousRepository)) {
         throw "Folder $destination sudah digunakan. Gunakan git clone untuk memilih folder lain."
+    }
+    if ($origin -eq $previousRepository) {
+        & $git -C $destination remote set-url origin $repository
+        if ($LASTEXITCODE -ne 0) { throw 'Gagal memperbarui alamat repo di instalasi lama.' }
     }
     & $git -C $destination pull --ff-only
     if ($LASTEXITCODE -ne 0) { throw "Gagal memperbarui CLIPY.ID. Periksa folder $destination." }
