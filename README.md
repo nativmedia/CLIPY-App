@@ -96,6 +96,8 @@ Gunakan port lain jika `8443` sudah dipakai.
 
 ## Prasyarat
 
+Di Windows, klik dua kali **prepare.bat** di folder proyek. Pilih **1** untuk memeriksa prasyarat atau **2** untuk memasang dependensi aplikasi dan menyiapkan model setelah prasyarat lengkap.
+
 Semua platform memerlukan Git, Node.js 24 LTS dengan npm, Python 3.12, Rust stable, serta FFmpeg dan FFprobe dengan libass dan libx264. Gunakan versi yang sudah terpasang jika memenuhi syarat.
 
 | Sistem | Kebutuhan tambahan |
