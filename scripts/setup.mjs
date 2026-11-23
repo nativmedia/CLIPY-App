@@ -95,7 +95,7 @@ async function installModel(name, url, sha256) {
   }
 }
 
-try {
+async function setup() {
   console.log("\nCLIPY.ID · Penyiapan desktop\n");
   console.log("[1/3] Memeriksa FFmpeg dan Python");
   const filters = probe("ffmpeg", ["-hide_banner", "-filters"]);
@@ -123,6 +123,17 @@ try {
   console.log("\n[3/3] Menyiapkan model crop dan deteksi tawa");
   for (const model of models) await installModel(...model);
   console.log("Dependensi CLIPY.ID siap.");
+}
+
+try {
+  if (process.argv.includes("--check")) {
+    const installed = await file(python) &&
+      probe(python, ["-c", "import fastapi, uvicorn; " + pythonCheck[1]]).status === 0;
+    const haveModels = (await Promise.all(models.map(([name]) => file(join(server, "models", name))))).every(Boolean);
+    process.exitCode = installed && haveModels ? 0 : 1;
+  } else {
+    await setup();
+  }
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

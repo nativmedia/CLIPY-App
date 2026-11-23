@@ -37,6 +37,8 @@ Tutup CLIPY.ID sebelum menjalankan ulang perintah instalasi untuk mengambil peru
 
 ## Jalankan dari kode sumber
 
+Di Windows, klik dua kali **CLIPY.ID.cmd** dari folder yang baru di-clone. Pembukaan pertama menyiapkan paket dan model secara otomatis. **prepare.bat** dapat dipakai untuk mengecek prasyarat sistem.
+
 ```sh
 git clone https://github.com/nativmedia/CLIPY-App.git
 cd CLIPY-App

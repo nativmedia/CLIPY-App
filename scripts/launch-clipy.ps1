@@ -2,7 +2,7 @@
 #
 # 1. Pulls a newer version from GitHub when one exists and it does not clash with
 #    local, uncommitted changes (a clash is reported and skipped, nothing is lost).
-# 2. Reinstalls dependencies when the update changed them.
+# 2. Installs missing dependencies and updates them when their inputs change.
 # 3. Restarts the API (port 4748) and the web server (port 4747) when their code
 #    changed since they were started, unless a project is still being processed.
 # 4. Opens CLIPY.ID in a Google Chrome app window.
@@ -192,21 +192,31 @@ try {
     $changed = @(Update-FromGitHub)
   }
 
-  # ---------- 2. dependencies changed by the update ----------
-  $needsNpm = @($changed | Where-Object { $_ -in @('package.json', 'package-lock.json', 'web/package.json') }).Count -gt 0
-  $needsSetup = @($changed | Where-Object { $_ -in @('server/requirements.txt', 'scripts/setup.mjs') }).Count -gt 0
+  # ---------- 2. first-run setup and dependency updates ----------
+  $node = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+  if (-not $node -or -not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
+    throw 'Node.js dan npm belum tersedia. Jalankan prepare.bat untuk melihat petunjuk pemasangan.'
+  }
+  $npmChanged = @($changed | Where-Object { $_ -in @('package.json', 'package-lock.json', 'web/package.json') }).Count -gt 0
+  $setupChanged = @($changed | Where-Object { $_ -in @('server/requirements.txt', 'scripts/setup.mjs') }).Count -gt 0
+  $needsNpm = $npmChanged -or -not (Test-Path -LiteralPath $Vite)
+  & $node (Join-Path $Repo 'scripts\setup.mjs') --check
+  $needsSetup = $setupChanged -or $LASTEXITCODE -ne 0
   if ($needsNpm -or $needsSetup) {
-    Say 'dependensi ................. berubah, memasang ulang (bisa beberapa menit)' 'Cyan'
-    Stop-Port $ApiPort
-    Stop-Port $WebPort
+    if ($busy) { throw 'CLIPY.ID sedang memproses project. Jalankan kembali setelah proses selesai untuk menyiapkan dependensi.' }
+    Say 'dependensi ................. menyiapkan aplikasi (bisa beberapa menit)' 'Cyan'
+    if ($npmChanged -or $setupChanged) {
+      Stop-Port $ApiPort
+      Stop-Port $WebPort
+    }
     if ($needsNpm) { Invoke-Npm @('ci') }
-    Invoke-Npm @('run', 'setup')
+    if ($needsSetup) { Invoke-Npm @('run', 'setup') }
   } elseif ($changed.Count -gt 0) {
     Say 'dependensi ................. tidak berubah' 'DarkGray'
   }
 
   if (-not (Test-Path -LiteralPath $Python) -or -not (Test-Path -LiteralPath $Vite)) {
-    throw "Dependensi CLIPY.ID belum tersedia di $Repo. Jalankan npm ci dan npm run setup di folder repo client."
+    throw "Penyiapan dependensi CLIPY.ID belum lengkap di $Repo. Periksa pesan instalasi di atas."
   }
 
   # ---------- 3. restart servers whose code changed ----------
@@ -237,7 +247,6 @@ try {
       -RedirectStandardError (Join-Path $Repo 'server\chrome-api-error.log')
   }
   if (-not $webUp) {
-    $node = (Get-Command node.exe -ErrorAction Stop).Source
     Start-Process -FilePath $node -ArgumentList ('"' + $Vite + '" --host 127.0.0.1 --port ' + $WebPort + ' --strictPort') `
       -WorkingDirectory (Join-Path $Repo 'web') -WindowStyle Hidden `
       -RedirectStandardOutput (Join-Path $Repo 'server\chrome-web.log') `
