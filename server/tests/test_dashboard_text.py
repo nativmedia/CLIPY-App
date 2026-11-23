@@ -22,6 +22,19 @@ def result(ids):
 
 
 class DashboardTextTests(unittest.TestCase):
+    def test_missing_variants_use_saved_short_hook_and_keep_long_paragraphs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p = sample_project(Path(directory))
+            dashboard_text.update(p, "1", "pendek", "Satu petunjuk, seribu tanda tanya!")
+            rows = result(["1", "2"])
+            rows["items"][0]["panjang"] = "Satu petunjuk mengubah arah cerita.\n\nSekarang pertanyaannya justru makin banyak."
+            with patch.object(dashboard_text.keys, "ask_json", return_value=rows) as ask:
+                generated = dashboard_text.ensure(p)
+            prompt = json.loads(ask.call_args.args[1])
+            self.assertEqual(prompt["items"][0]["deskripsi_dasar"], generated["1"]["pendek"])
+            self.assertIn("hiperbola", ask.call_args.args[0])
+            self.assertIn("\n\n", generated["1"]["panjang"])
+
     def test_clip_and_sequence_generation_preserves_old_posts_and_edits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -54,7 +67,9 @@ class DashboardTextTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 dashboard_text.update(p, "999", "pendek", "x")
             with self.assertRaises(ValueError):
-                dashboard_text.update(p, "1", "pendek", "x" * 71)
+                dashboard_text.update(p, "1", "pendek", "x" * 601)
+            for field in dashboard_text.OPTION_FIELDS:
+                dashboard_text.update(p, "1", field, "x" * 600)
             self.assertLessEqual(len(dashboard_text._fit("kata " * 40, 70)), 70)
 
     def test_thumbnail_auto_uses_clip_title_and_respects_manual_or_none(self):

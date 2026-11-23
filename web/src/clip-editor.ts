@@ -1,7 +1,7 @@
 /**
  * Clip editor in the spirit of Remotion / CapCut: a live preview player with a
  * caption overlay, a timeline with in/out handles and a caption track, and the
- * transcript as one editable box per sentence with its time range. Saving
+ * transcript as one flowing text that lights up the spoken word. Saving
  * re-renders the clip in place.
  */
 
@@ -101,18 +101,22 @@ function sentencesOf(words: EditWord[]): Sentence[] {
 
 let active: { close: () => void } | null = null;
 
-export async function openClipEditor(projectId: string, clipNumber: number, ratio: string, onSaved: () => void): Promise<void> {
+type SaveResult = { status?: string; clips?: Pick<EditInfo, "n" | "video">[]; detail?: string };
+
+export async function openClipEditor(projectId: string, clipNumber: number, ratio: string, onSaved: (pending: boolean) => void, signal?: AbortSignal): Promise<void> {
   active?.close();
   const base = `/api/projects/${encodeURIComponent(projectId)}/clips/${clipNumber}/edit`;
-  const res = await fetch(base);
+  const res = await fetch(base, { cache: "no-store", signal });
   if (!res.ok) {
     const detail = (await res.json().catch(() => null))?.detail;
     throw new Error(res.status === 404 && !detail ? "Server belum dimuat ulang" : detail ?? `status ${res.status}`);
   }
-  buildEditor(base, (await res.json()) as EditInfo, ratio, onSaved);
+  const info: EditInfo = await res.json();
+  signal?.throwIfAborted();
+  buildEditor(base, info, ratio, onSaved);
 }
 
-function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () => void) {
+function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: (pending: boolean) => void) {
   const [lo, hi] = info.window;
   const original = { start: info.start, end: info.end };
   const range = { start: info.start, end: info.end };
@@ -142,18 +146,21 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
   stage.style.setProperty("--cap-accent", look.accent);
   stage.style.setProperty("--cap-scale", String(look.size || 1));
   stage.dataset.case = look.case;
+  stage.dataset.anim = look.animation;
   const capTop = look.position ? 17 + (look.position - 1) * 11 : 72;
   capLine.style.top = `${capTop}%`;
 
   const playBtn = h("button", { type: "button", className: "ce-play", ariaLabel: "putar", title: "putar / jeda (spasi)" });
+  let pendingPlay = false;
   const timeNow = h("span", { className: "ce-time" });
-  const loopBtn = h("button", { type: "button", className: "ce-chip is-on", textContent: "⟲ loop", title: "ulang dalam rentang clip" });
+  const loopBtn = h("button", { type: "button", className: "ce-chip ce-loop is-on", ariaLabel: "Ulang klip", ariaPressed: "true", title: "Ulang klip" });
+  loopBtn.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4m14-1v2a3 3 0 0 1-3 3H3"/></svg>';
   const sourceNote = h("span", { className: "ce-source" });
   const retryPreview = h("button", { type: "button", className: "ce-chip", textContent: "coba lagi", hidden: true });
   const transport = h("div", { className: "ce-transport" }, playBtn, timeNow, loopBtn);
   const status = h("div", { className: "ce-status" }, sourceNote, retryPreview);
 
-  const list = h("div", { className: "ce-list" });
+  const list = h("div", { className: "ce-list", tabIndex: 0 });
   const listCount = h("span", { className: "ce-count" });
   const listPanel = h(
     "div",
@@ -225,6 +232,7 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
   const cancel = h("button", { type: "button", className: "text-button", textContent: "batal" });
   const reset = h("button", { type: "button", className: "text-button", textContent: "reset semua" });
   const save = h("button", { type: "button", className: "ce-save", textContent: "simpan & render ulang" });
+  let saving = false;
 
   const close = () => {
     cancelAnimationFrame(raf);
@@ -233,7 +241,7 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
     video.load();
     root.remove();
     document.removeEventListener("keydown", onKey);
-    if (!document.querySelector(".modal:not([hidden])")) document.body.classList.remove("locked");
+    if (!document.querySelector(".modal:not([hidden]), .editor:not([hidden])")) document.body.classList.remove("locked");
     active = null;
   };
   active = { close };
@@ -250,7 +258,7 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
         { className: "ce-head" },
         h("p", { className: "kicker" }, h("span", { textContent: `edit clip ${String(info.n).padStart(2, "0")}` })),
         h("h3", { className: "ce-title", textContent: info.title }),
-        h("p", { className: "ce-help", textContent: "spasi putar/jeda · seret pegangan sian untuk memotong · klik kalimat untuk mengubah teks" }),
+        h("p", { className: "ce-help", textContent: "spasi putar/jeda · seret pegangan sian untuk memotong · klik kata untuk lompat · klik 2× kata untuk edit" }),
       ),
       h("div", { className: `ce-grid${rw > rh ? " is-landscape" : ""}` }, h("div", { className: "ce-player" }, stage, transport, status), listPanel),
       h("div", { className: "ce-timeline" }, lanes, timelineFoot),
@@ -273,17 +281,37 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
     paint(t);
   }
   function setPlaying(on: boolean) {
-    if (on) {
-      if (!source) return;
-      const t = now();
-      if (t < range.start - 0.05 || t >= range.end - 0.05) seek(range.start);
-      video.play().catch(() => {});
-    } else video.pause();
+    if (!on) {
+      pendingPlay = false;
+      video.pause();
+      return;
+    }
+    if (!source) {
+      // Nothing to play yet: remember the request and start as soon as a preview arrives.
+      pendingPlay = true;
+      playBtn.classList.add("is-waiting");
+      return;
+    }
+    pendingPlay = false;
+    const t = now();
+    if (t < range.start - 0.05 || t >= range.end - 0.05) seek(range.start);
+    video.play().catch((err: Error) => {
+      if (err.name !== "AbortError" && root.isConnected) setStatus("failed", err.message);
+    });
   }
+  video.addEventListener("error", () => {
+    if (!root.isConnected) return;
+    // The rendered clip file can disappear while it is being rendered again: fall back to the live preview.
+    if (source && !source.full) {
+      source = null;
+      loadPreview();
+    } else setStatus("failed", "video tidak bisa dimuat");
+  });
   playBtn.addEventListener("click", () => setPlaying(video.paused));
   loopBtn.addEventListener("click", () => {
     loop = !loop;
     loopBtn.classList.toggle("is-on", loop);
+    loopBtn.setAttribute("aria-pressed", String(loop));
   });
   video.addEventListener("play", () => {
     playBtn.classList.add("is-playing");
@@ -297,7 +325,6 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
     paint(now());
   });
   video.addEventListener("seeked", () => paint(now()));
-  video.addEventListener("loadedmetadata", () => seek(range.start));
 
   function tick() {
     cancelAnimationFrame(raf);
@@ -315,7 +342,9 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
   }
 
   const onKey = (e: KeyboardEvent) => {
-    const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
+    const field = e.target;
+    const typing = ((field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement) && !field.readOnly)
+      || (field instanceof HTMLElement && field.isContentEditable);
     if (e.key === "Escape" && !typing) close();
     if (e.key === " " && !typing && !(e.target instanceof HTMLButtonElement && e.target.classList.contains("ce-handle"))) {
       e.preventDefault();
@@ -387,99 +416,197 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
     return pages;
   }
 
-  // ---------- transcript boxes ----------
-  const boxes = new Map<string, { box: HTMLElement; area: HTMLTextAreaElement; block: HTMLElement }>();
-  function grow(area: HTMLTextAreaElement) {
-    area.style.height = "auto";
-    area.style.height = `${area.scrollHeight}px`;
+  // ---------- transcript: one flowing text, word by word ----------
+  type Tok = { text: string; start: number; end: number; edited: boolean; removed: boolean };
+  type Entry = { s: Sentence; group: HTMLElement; block: HTMLElement; spans: HTMLElement[]; toks: Tok[] };
+  const entries = new Map<string, Entry>();
+  /** Gaps at least this long show as a small pause badge, as in a speech editor. */
+  const PAUSE = 0.4;
+
+  /** The words a sentence shows now. A changed word count spreads the sentence's time by word length. */
+  function toksOf(s: Sentence): Tok[] {
+    const orig = s.words.map((w) => w.text);
+    if (!edits.has(s.key)) return s.words.map((w) => ({ ...w, edited: false, removed: false }));
+    const shown = tokens(edits.get(s.key) ?? "");
+    if (!shown.length) return s.words.map((w) => ({ ...w, edited: true, removed: true }));
+    if (shown.length === s.words.length) {
+      return shown.map((text, i) => ({ text, start: s.words[i].start, end: s.words[i].end, edited: text !== orig[i], removed: false }));
+    }
+    const weights = shown.map((t) => t.length + 2);
+    const total = weights.reduce((a, b) => a + b, 0) || 1;
+    let at = s.start;
+    return shown.map((text, i) => {
+      const step = ((s.end - s.start) * weights[i]) / total;
+      const tok = { text, start: at, end: at + step, edited: true, removed: false };
+      at += step;
+      return tok;
+    });
   }
+
+  /** Replace word `i` of a sentence; an empty value drops the word, several words split it. */
+  function setToken(s: Sentence, i: number, value: string) {
+    const orig = s.words.map((w) => w.text);
+    const current = toksOf(s);
+    const words = current.some((t) => t.removed) ? [...orig] : current.map((t) => t.text);
+    const next = [...words.slice(0, i), ...tokens(value), ...words.slice(i + 1)].join(" ");
+    if (next === orig.join(" ")) edits.delete(s.key);
+    else edits.set(s.key, next);
+  }
+
+  function pauseBadge(seconds: number) {
+    return h("span", { className: "ce-pause", textContent: `${seconds.toFixed(2)}s`, title: "jeda" });
+  }
+
   function renderSentences() {
     const inRange = words.filter((w) => w.end > range.start + 0.02 && w.start < range.end - 0.02);
     sentences = sentencesOf(inRange);
-    boxes.clear();
-    list.replaceChildren(
-      ...sentences.map((s) => {
-        const fresh = s.end <= original.start + 0.02 || s.start >= original.end - 0.02;
-        const time = h("button", {
-          type: "button",
-          className: "ce-box-time",
-          textContent: `${tc(s.start - range.start)}  →  ${tc(s.end - range.start)}`,
-          title: "putar dari kalimat ini",
-          onclick: () => {
-            seek(s.start);
-            setPlaying(true);
-          },
+    entries.clear();
+    lastWord = null;
+    lastActive = "";
+    const flow: (Node | string)[] = [];
+    let prevEnd: number | null = null;
+    for (const s of sentences) {
+      const fresh = s.end <= original.start + 0.02 || s.start >= original.end - 0.02;
+      if (prevEnd !== null && s.start - prevEnd >= PAUSE) flow.push(pauseBadge(s.start - prevEnd), " ");
+      const toks = toksOf(s);
+      const group = h("span", { className: `ce-sent${fresh ? " is-new" : ""}` });
+      group.dataset.key = s.key;
+      const spans: HTMLElement[] = [];
+      toks.forEach((tok, i) => {
+        if (i) {
+          const gap = tok.start - toks[i - 1].end;
+          group.append(" ", ...(gap >= PAUSE && !tok.removed ? [pauseBadge(gap), " "] : []));
+        }
+        const span = h("span", {
+          className: `ce-word${tok.edited ? " is-edited" : ""}${tok.removed ? " is-removed" : ""}`,
+          textContent: tok.text,
         });
-        const undo = h("button", { type: "button", className: "ce-undo", textContent: "↺", title: "kembalikan teks asli" });
-        const area = h("textarea", { className: "ce-area", rows: 1, spellcheck: false, value: textOf(s) });
-        area.ariaLabel = `kalimat ${tc(s.start - range.start)}`;
-        const box = h("div", { className: "ce-sentence" }, h("div", { className: "ce-sentence-head" }, time, fresh ? h("span", { className: "ce-tag", textContent: "baru" }) : null, undo), area);
-        const sync = () => {
-          const originalText = s.words.map((w) => w.text).join(" ");
-          const value = area.value.replace(/\s+/g, " ").trim();
-          if (value === originalText) edits.delete(s.key);
-          else edits.set(s.key, value);
-          box.classList.toggle("is-edited", edits.has(s.key));
-          box.classList.toggle("is-removed", edits.has(s.key) && !value);
-          boxes.get(s.key)?.block.classList.toggle("is-edited", edits.has(s.key));
-          paint(now());
-          refresh();
-        };
-        area.addEventListener("input", () => {
-          grow(area);
-          sync();
-        });
-        area.addEventListener("focus", () => {
-          if (now() < s.start || now() >= s.end) seek(s.start);
-        });
-        area.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            const keys = [...boxes.keys()];
-            boxes.get(keys[keys.indexOf(s.key) + 1])?.area.focus();
-          }
-        });
-        undo.addEventListener("click", () => {
-          area.value = s.words.map((w) => w.text).join(" ");
-          grow(area);
-          sync();
-        });
-        box.classList.toggle("is-edited", edits.has(s.key));
-        box.classList.toggle("is-new", fresh);
-        const block = h("button", { type: "button", className: "ce-block", title: textOf(s) });
-        block.style.left = `${pct(s.start)}%`;
-        block.style.width = `${Math.max(0.4, pct(s.end) - pct(s.start))}%`;
-        block.classList.toggle("is-edited", edits.has(s.key));
-        block.addEventListener("click", () => {
-          seek(s.start);
-          area.focus({ preventScroll: true });
-          box.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        });
-        boxes.set(s.key, { box, area, block });
-        requestAnimationFrame(() => grow(area));
-        return box;
-      }),
-    );
-    captionTrack.replaceChildren(...[...boxes.values()].map((b) => b.block));
+        span.dataset.i = String(i);
+        spans.push(span);
+        group.append(span);
+      });
+      flow.push(group, " ");
+      const block = h("button", { type: "button", className: "ce-block", title: toks.map((t) => t.text).join(" ") });
+      block.style.left = `${pct(s.start)}%`;
+      block.style.width = `${Math.max(0.4, pct(s.end) - pct(s.start))}%`;
+      block.classList.toggle("is-edited", edits.has(s.key));
+      block.addEventListener("click", () => {
+        seek(s.start);
+        list.focus({ preventScroll: true });
+        scrollToWord(spans[0], true);
+      });
+      entries.set(s.key, { s, group, block, spans, toks });
+      prevEnd = s.end;
+    }
+    list.replaceChildren(h("p", { className: "ce-flow" }, ...flow));
+    captionTrack.replaceChildren(...[...entries.values()].map((e) => e.block));
     listCount.textContent = `${sentences.length} kalimat`;
   }
 
-  let lastActive = "";
-  function paintActiveSentence(t: number) {
-    const s = sentences.find((x) => t >= x.start && t < x.end + 0.35);
-    const key = s?.key ?? "";
-    if (key === lastActive) return;
-    boxes.get(lastActive)?.box.classList.remove("is-active");
-    boxes.get(lastActive)?.block.classList.remove("is-active");
-    lastActive = key;
-    const entry = boxes.get(key);
-    if (!entry) return;
-    entry.box.classList.add("is-active");
-    entry.block.classList.add("is-active");
-    // Follow the playhead while playing and while scrubbing the timeline.
-    if ((!video.paused || dragging) && document.activeElement?.closest(".ce-list") == null) {
-      list.scrollTo({ top: entry.box.offsetTop - list.offsetTop - 8, behavior: "smooth" });
+  function wordAt(target: EventTarget | null) {
+    const span = (target as HTMLElement | null)?.closest<HTMLElement>(".ce-word");
+    const key = span?.closest<HTMLElement>(".ce-sent")?.dataset.key;
+    const entry = key ? entries.get(key) : undefined;
+    if (!span || !entry) return null;
+    const i = Number(span.dataset.i);
+    return { span, entry, i, tok: entry.toks[i] };
+  }
+
+  let editing: HTMLElement | null = null;
+  // One click jumps the playhead to the word; two clicks edit it.
+  list.addEventListener("click", (e) => {
+    const hit = wordAt(e.target);
+    if (!hit || hit.span === editing) return;
+    seek(hit.tok.start);
+    list.focus({ preventScroll: true });
+  });
+  list.addEventListener("dblclick", (e) => {
+    const hit = wordAt(e.target);
+    if (!hit || hit.tok.removed) return;
+    e.preventDefault();
+    editWord(hit.span, hit.entry.s, hit.i);
+  });
+
+  function editWord(span: HTMLElement, s: Sentence, i: number) {
+    if (editing) editing.blur();
+    video.pause();
+    const before = span.textContent ?? "";
+    editing = span;
+    span.contentEditable = "plaintext-only";
+    span.classList.add("is-editing");
+    span.focus({ preventScroll: true });
+    const sel = getSelection();
+    const all = document.createRange();
+    all.selectNodeContents(span);
+    sel?.removeAllRanges();
+    sel?.addRange(all);
+    let done = false;
+    const finish = (keep: boolean) => {
+      if (done) return;
+      done = true;
+      editing = null;
+      span.contentEditable = "false";
+      span.classList.remove("is-editing");
+      const value = (span.textContent ?? "").replace(/\s+/g, " ").trim();
+      if (keep && value !== before) {
+        const top = list.scrollTop;
+        setToken(s, i, value);
+        renderSentences();
+        list.scrollTop = top;
+        refresh();
+      } else span.textContent = before;
+      paint(now());
+      list.focus({ preventScroll: true });
+    };
+    span.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(false);
+      }
+    });
+    span.addEventListener("blur", () => finish(true), { once: true });
+  }
+
+  function scrollToWord(span: HTMLElement | undefined, force = false) {
+    if (!span) return;
+    const top = span.offsetTop - list.offsetTop;
+    const view = list.clientHeight;
+    if (force || top < list.scrollTop + 8 || top > list.scrollTop + view - 40) {
+      list.scrollTo({ top: Math.max(0, top - view / 3), behavior: "smooth" });
     }
+  }
+
+  let lastActive = "";
+  let lastWord: HTMLElement | null = null;
+  function paintActiveSentence(t: number) {
+    // A seek lands on a video frame a few hundredths early, so each word owns
+    // the stretch from just before its start to just before the next word.
+    const s = sentences.find((x) => t >= x.start - 0.06 && t < x.end - 0.06) ?? sentences.find((x) => t >= x.end - 0.06 && t < x.end + 0.35);
+    const key = s?.key ?? "";
+    if (key !== lastActive) {
+      entries.get(lastActive)?.block.classList.remove("is-active");
+      entries.get(key)?.block.classList.add("is-active");
+      lastActive = key;
+    }
+    const entry = entries.get(key);
+    let word: HTMLElement | null = null;
+    if (entry) {
+      let at = -1;
+      entry.toks.forEach((tok, i) => {
+        if (t >= tok.start - 0.06) at = i;
+      });
+      word = entry.spans[Math.max(0, at)] ?? null;
+    }
+    if (word === lastWord) return;
+    lastWord?.classList.remove("is-now");
+    word?.classList.add("is-now");
+    lastWord = word;
+    // Follow the spoken word while playing and while scrubbing the timeline.
+    if (word && (!video.paused || dragging) && !editing) scrollToWord(word);
   }
 
   function paint(t: number) {
@@ -614,32 +741,32 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
   });
 
   // ---------- source: rendered clip first, then the full live window ----------
+  let previewLoading = false;
   function useSource(next: Source) {
     const t = now();
-    const playing = !video.paused;
+    const playing = !video.paused || pendingPlay;
     source = next;
+    playBtn.classList.remove("is-waiting");
+    video.onloadedmetadata = () => {
+      seek(covered(t) ? t : range.start);
+      if (playing) setPlaying(true);
+    };
     video.src = next.url;
-    video.addEventListener(
-      "loadedmetadata",
-      () => {
-        seek(covered(t) ? t : range.start);
-        if (playing) setPlaying(true);
-      },
-      { once: true },
-    );
   }
   function setStatus(state: "loading" | "live" | "failed", detail = "") {
     stage.classList.toggle("is-loading", state === "loading");
     loading.hidden = state !== "loading";
     retryPreview.hidden = state !== "failed";
+    status.hidden = state === "live";
     sourceNote.className = `ce-source is-${state}`;
-    sourceNote.textContent =
-      state === "live" ? "● preview live — perubahan langsung terlihat"
-      : state === "loading" ? "◌ menyiapkan preview penuh… (klip lama diputar dulu)"
-      : "preview penuh gagal · caption baru terlihat setelah render";
+    // Only a failure needs words; loading already shows the spinner on the video.
+    sourceNote.textContent = state === "failed" ? "preview penuh gagal · caption baru terlihat setelah render" : "";
+    status.hidden = state !== "failed";
     sourceNote.title = detail;
   }
   function loadPreview() {
+    if (previewLoading) return;
+    previewLoading = true;
     setStatus("loading");
     fetch(`${base}/preview`, { method: "POST" })
       .then(async (res) => {
@@ -651,6 +778,9 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
       })
       .catch((err) => {
         if (root.isConnected) setStatus("failed", (err as Error).message);
+      })
+      .finally(() => {
+        previewLoading = false;
       });
   }
   retryPreview.addEventListener("click", loadPreview);
@@ -686,7 +816,7 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
     const edited = sentences.filter((s) => edits.has(s.key)).length;
     if (edited) parts.push(`${edited} kalimat diubah`);
     summary.textContent = parts.length ? `> perubahan: ${parts.join(" · ")}` : "> belum ada perubahan";
-    save.disabled = !parts.length;
+    save.disabled = saving || !parts.length;
     reset.hidden = !parts.length;
     listCount.textContent = `${sentences.length} kalimat${edited ? ` · ${edited} diubah` : ""}`;
   }
@@ -700,23 +830,32 @@ function buildEditor(base: string, info: EditInfo, ratio: string, onSaved: () =>
   });
 
   save.addEventListener("click", async () => {
+    if (saving) return;
+    saving = true;
     save.disabled = true;
-    save.textContent = "menyimpan…";
+    save.textContent = "menyiapkan render ulang…";
     error.textContent = "";
+    let result: SaveResult | null;
     try {
       const res = await fetch(base, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ start: range.start, end: range.end, fixes: fixes() }),
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `status ${res.status}`);
-      close();
-      onSaved();
+      result = await res.json().catch(() => null) as SaveResult | null;
+      if (!res.ok) throw new Error(result?.detail ?? `status ${res.status}`);
     } catch (err) {
       error.textContent = (err as Error).message;
       save.textContent = "simpan & render ulang";
-      save.disabled = false;
+      saving = false;
+      refresh();
+      return;
     }
+    if (root.isConnected) close();
+    const status = result?.status ?? "";
+    const video = result?.clips?.find((clip) => clip.n === info.n)?.video;
+    if (status === "done" && video === info.video) return;
+    onSaved(!["done", "error", "cancelled"].includes(status));
   });
 
   document.body.append(root);

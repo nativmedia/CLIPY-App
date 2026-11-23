@@ -1,5 +1,7 @@
 import { Marquee } from "./marquee";
-import { el, openEditor, openPreview, openYoutubeInBrowser, retryClip, type Project } from "./editor";
+import { HEX_RE, isLightColor, openColorPicker } from "./color-picker";
+import { askDeleteProject, icon } from "./project-delete";
+import { el, isProjectProcessing, openEditor, openPreview, openYoutubeInBrowser, retryClip, updatePreviewProject, type Project } from "./editor";
 import { disposeProjectIslands, mountClipResults, mountProjectSettings } from "./project-components";
 import { filmConcatControls } from "./film-concat";
 import { previewSelect } from "./option-preview";
@@ -421,7 +423,7 @@ function useSource(s: LocalSource) {
 
 async function openLibrary() {
   const version = ++libraryVersion;
-  setHint(libraryHint, mode === "filming" ? "pilih video sebagai sumber filming" : "videos clipped before · pick one to clip it again with new moments");
+  setHint(libraryHint, mode === "filming" ? "Pilih video sebagai sumber Filming." : "Pilih video untuk membuat klip dari momen baru.");
   library.hidden = false;
   document.body.classList.add("locked");
   libraryList.replaceChildren(el("li", { className: "library-empty", textContent: "loading…" }));
@@ -514,8 +516,8 @@ async function useLastSettings(source: LocalSource, action: HTMLButtonElement, s
     restoreCaptionStyle(s.caption.animation, s.caption.font);
     setThumbPosition(s.thumb.position ?? "bc");
     sel.case.value = options?.cases[s.caption.case] ? s.caption.case : DEFAULT_CAPTION_CASE;
-    color = options?.colors[s.caption.color] ? s.caption.color : DEFAULT_CAPTION_COLOR;
-    swatches.querySelectorAll<HTMLButtonElement>("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.color === color)));
+    color = options?.colors[s.caption.color] || HEX_RE.test(s.caption.color) ? s.caption.color : DEFAULT_CAPTION_COLOR;
+    syncSwatches();
     sel.source.value = s.thumb.source;
     sel.titleStyle.value = s.thumb.title_style;
     thumbText.value = s.thumb.text ?? "";
@@ -818,28 +820,89 @@ type CaptionPreset = {
  * font, colour and letter case, which can still be changed afterwards.
  */
 const CAPTION_PRESETS: Record<string, CaptionPreset> = {
+  plain: { label: "Plain", animation: "plain", font: "jakarta", color: "white", display: "sentence", letterCase: "sentence", title: "bold", description: "Teks putih polos tanpa sorotan dan tanpa animasi." },
   "viral-pop": { label: "Viral Pop", animation: "pop", font: "montserrat", color: "yellow", display: "sentence", letterCase: "upper", title: "pop", description: "Kata muncul satu per satu; kata kunci mendarat paling besar." },
   "clean-bold": { label: "Clean Bold", animation: "clean", font: "jakarta", color: "yellow", display: "sentence", letterCase: "sentence", title: "bold", description: "Bersih dan tegas; kata yang ditekankan membesar dan berwarna." },
   karaoke: { label: "Karaoke", animation: "karaoke", font: "tiktok", color: "cyan", display: "sentence", letterCase: "sentence", title: "underline", description: "Warna mengikuti kata yang diucapkan; kata kunci lebih besar." },
   "sticker-marker": { label: "Sticker Marker", animation: "marker", font: "poppins", color: "yellow", display: "sentence", letterCase: "upper", title: "box", description: "Kata yang ditekankan diberi kotak stiker miring." },
   "headline-jumbo": { label: "Headline Jumbo", animation: "headline", font: "anton", color: "yellow", display: "sentence", letterCase: "upper", title: "bold", description: "Kata kunci naik ke baris sendiri, besar seperti judul." },
   "aesthetic-soft": { label: "Aesthetic Soft", animation: "aesthetic", font: "dm-serif", color: "cream", display: "sentence", letterCase: "lower", title: "none", description: "Huruf kecil yang lembut untuk vlog dan lifestyle." },
-  "podcast-clean": { label: "Podcast Clean", animation: "clean", font: "jakarta", color: "cream", display: "sentence", letterCase: "sentence", title: "shadow", description: "Tenang untuk obrolan panjang; kata kunci membesar dengan aksen krem." },
-  edukasi: { label: "Edukasi", animation: "clean", font: "poppins", color: "green", display: "sentence", letterCase: "sentence", title: "bold", description: "Kata penting dalam penjelasan tampil lebih besar dan hijau." },
-  "hype-gaming": { label: "Hype Gaming", animation: "pop", font: "bangers", color: "pink", display: "word", letterCase: "upper", title: "pop", description: "Satu kata per layar, meledak seperti komik." },
-  "story-drama": { label: "Story Drama", animation: "marker", font: "bebas", color: "red", display: "sentence", letterCase: "upper", title: "stamp", description: "Kapital sinematik dengan kotak merah untuk momen dramatis." },
   "neon-glow": { label: "Neon Glow", animation: "glow", font: "montserrat", color: "cyan", display: "sentence", letterCase: "upper", title: "bold", description: "Kata bercahaya neon; garis gelap tipis menjaga teks tetap terbaca." },
   "fly-in": { label: "Fly In", animation: "rise", font: "jakarta", color: "yellow", display: "sentence", letterCase: "sentence", title: "bold", description: "Tiap kata melayang naik dari bawah dengan gerak melambat yang halus, lalu mendarat tepat saat diucapkan." },
   "serif-accent": { label: "Serif Accent", animation: "duo", font: "jakarta", color: "cream", display: "sentence", letterCase: "sentence", title: "shadow", description: "Kata yang ditekankan berganti ke font serif elegan dan tampil lebih besar." },
+  "block-word": { label: "Block Word", animation: "block", font: "jakarta", color: "red", display: "sentence", letterCase: "sentence", title: "bold", description: "Kata muncul satu per satu; kata penekanan diblok warna seperti stabilo yang menyapu dari kiri." },
+  "pill-highlight": { label: "Pill Highlight", animation: "chip", font: "montserrat", color: "lime", display: "sentence", letterCase: "upper", title: "bold", description: "Frasa pendek di atas pil putih; kata yang sedang diucapkan diberi sorotan warna." },
+  "3d-pop": { label: "3D Pop", animation: "extrude", font: "montserrat", color: "yellow", display: "sentence", letterCase: "upper", title: "bold", description: "Huruf tebal 3D dengan sisi gelap ke bawah seperti judul game; kata penekanan lebih besar." },
+  typewriter: { label: "Typewriter", animation: "typewriter", font: "jakarta", color: "yellow", display: "sentence", letterCase: "sentence", title: "bold", description: "Tiap kata diketik huruf demi huruf saat diucapkan, dengan kursor berkedip." },
+  punchy: { label: "Punchy", animation: "punchy", font: "anton", color: "yellow", display: "word", letterCase: "upper", title: "pop", description: "Satu kata per layar yang menghantam masuk dari besar lalu bergetar saat mendarat." },
   "script-accent": { label: "Script Accent", animation: "script", font: "montserrat", color: "yellow", display: "sentence", letterCase: "sentence", title: "bold", description: "Kata yang ditekankan berganti ke tulisan tangan yang jauh lebih besar." },
 };
 captionPreset.replaceChildren(...Object.entries(CAPTION_PRESETS).map(([value, preset]) => el("option", { value, textContent: preset.label })));
 captionPreset.value = DEFAULT_CAPTION_PRESET;
+
+/*
+ * Presets as a grid of small caption previews. Each card shows its preset's own
+ * font and colour; the animation plays while the card is hovered or focused.
+ * The hidden <select> stays the source of truth.
+ */
+const presetGrid = $<HTMLElement>("#preset-grid");
+const presetCards = new Map<string, { card: HTMLButtonElement; preview: HTMLElement }>();
+const LIGHT_ACCENTS = ["yellow", "cream", "white", "green", "cyan", "lime"];
+for (const [key, preset] of Object.entries(CAPTION_PRESETS)) {
+  const preview = el("span", { className: "caption-style-preview", ariaHidden: "true" },
+    el("span", { className: "caption-style-words" },
+      el("span", { className: "caption-style-context", textContent: "Ini Caption " }),
+      el("strong", { textContent: "Clipy" })));
+  Object.assign(preview.dataset, {
+    style: preset.animation, font: preset.font, case: preset.letterCase, display: preset.display,
+    playing: "false", lightAccent: String(LIGHT_ACCENTS.includes(preset.color)),
+  });
+  const card = el("button", { type: "button", className: "preset-card", role: "radio" },
+    preview, el("span", { className: "preset-card-name", textContent: preset.label }));
+  card.dataset.preset = key;
+  let loop = 0;
+  const replay = () => {
+    preview.dataset.playing = "false";
+    void preview.offsetWidth; // restart the animation
+    preview.dataset.playing = "true";
+  };
+  const start = () => {
+    window.clearInterval(loop);
+    replay();
+    loop = window.setInterval(replay, 1800);
+  };
+  const stop = () => {
+    window.clearInterval(loop);
+    preview.dataset.playing = "false";
+  };
+  card.addEventListener("pointerenter", start);
+  card.addEventListener("pointerleave", stop);
+  card.addEventListener("focus", start);
+  card.addEventListener("blur", stop);
+  card.addEventListener("click", () => {
+    if (captionPreset.value === key) return;
+    captionPreset.value = key;
+    captionPreset.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  presetCards.set(key, { card, preview });
+  presetGrid.append(card);
+}
+function syncPresetGrid() {
+  for (const [key, { card, preview }] of presetCards) {
+    const preset = CAPTION_PRESETS[key];
+    const on = key === captionPreset.value;
+    card.classList.toggle("is-selected", on);
+    card.ariaChecked = String(on);
+    const accent = options?.colors?.[preset.color];
+    if (accent) preview.style.setProperty("--caption-preview-accent", accent);
+    preview.style.setProperty("--caption-font-scale", String(options?.font_sizes?.[preset.font] ?? 1));
+  }
+}
 let captionAnimation = DEFAULT_CAPTION_STYLE;
 const DEFAULT_CAPTION_CASE = "sentence";
 const STALE_CAPTION_ENGINE = "Server CLIPY.ID masih memakai mesin caption lama. Muat ulang server agar pratinjau dan hasil render sesuai.";
 const CAPTION_COLOR_LABELS: Record<string, string> = {
-  yellow: "Kuning", white: "Putih", cream: "Krem", orange: "Oranye", green: "Hijau", cyan: "Sian", pink: "Merah muda", red: "Merah",
+  yellow: "Kuning", white: "Putih", cream: "Krem", orange: "Oranye", green: "Hijau", cyan: "Sian", pink: "Merah muda", red: "Merah", lime: "Lime",
 };
 const CAPTION_CASE_LABELS: Record<string, string> = {
   upper: "ALL CAPS", lower: "lowercase", title: "Title Case", sentence: "Sentence case",
@@ -919,9 +982,55 @@ function restoreCaptionStyle(animation: string, font: string | null | undefined)
 }
 
 function setCaptionColor(name: string) {
-  color = options?.colors && !Object.hasOwn(options.colors, name) ? DEFAULT_CAPTION_COLOR : name;
-  swatches.querySelectorAll<HTMLButtonElement>("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.color === color)));
+  color = options?.colors && !Object.hasOwn(options.colors, name) && !HEX_RE.test(name) ? DEFAULT_CAPTION_COLOR : name;
+  syncSwatches();
 }
+
+/** The caption colour as #RRGGBB, named or custom. */
+function colorHex(name: string): string {
+  return options?.colors?.[name] ?? (HEX_RE.test(name) ? name.toUpperCase() : "");
+}
+
+/*
+ * The colour field, Figma style: one chip with the colour in use and its HEX
+ * code next to it. The chip opens a picker with the ready-made swatches; the
+ * code can be typed straight in.
+ */
+const colorChip = el("button", { type: "button", className: "color-chip", title: "Pilih warna", ariaLabel: "Pilih warna highlight" });
+const colorHexInput = el("input", { className: "color-hex", maxLength: 7, spellcheck: false, ariaLabel: "Kode warna HEX" });
+swatches.append(colorChip, colorHexInput);
+function syncSwatches() {
+  const hex = colorHex(color);
+  colorChip.style.setProperty("--c", hex || "transparent");
+  const name = CAPTION_COLOR_LABELS[color];
+  colorChip.title = name ? `${name} · ${hex}` : hex;
+  if (document.activeElement !== colorHexInput) colorHexInput.value = hex.replace("#", "");
+}
+function pickColor(value: string) {
+  color = value;
+  syncSwatches();
+  progress();
+}
+colorChip.addEventListener("click", () => {
+  colorChip.ariaExpanded = "true";
+  const ready = Object.entries(options?.colors ?? {}).map(([value, hex]) => ({ value, hex, label: CAPTION_COLOR_LABELS[value] ?? value }));
+  openColorPicker(colorChip, colorHex(color) || "#FFD60A", pickColor, ready);
+  // The picker removes itself; the chip's expanded state follows it.
+  const watch = window.setInterval(() => {
+    if (!document.querySelector(".cp")) {
+      colorChip.ariaExpanded = "false";
+      window.clearInterval(watch);
+    }
+  }, 200);
+});
+colorHexInput.addEventListener("input", () => {
+  const value = `#${colorHexInput.value.trim().replace(/^#/, "")}`.toUpperCase();
+  if (HEX_RE.test(value)) pickColor(value);
+});
+colorHexInput.addEventListener("blur", syncSwatches);
+colorHexInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") colorHexInput.blur();
+});
 
 /** One line above START so the whole setup can be checked at a glance. */
 function summarizeSettings() {
@@ -940,7 +1049,7 @@ function captionEngineReady() {
     .every((preset) => Object.hasOwn(animations, preset.animation) && Object.hasOwn(fonts, preset.font));
 }
 
-const CAPTION_PREVIEW_CONTEXT = "Biar lebih ";
+const CAPTION_PREVIEW_CONTEXT = "Ini Caption ";
 const captionPreviewContext = $<HTMLElement>("#caption-style-context");
 let captionWordTimers: number[] = [];
 
@@ -1036,19 +1145,8 @@ async function populateOptions() {
   fill(sel.voice, [["none", "No Voice Over"], ...Object.entries(o.voices)], THUMBNAIL_DEFAULTS.voice);
   filmVoice.replaceChildren(...Object.entries(o.voices).map(([value, label]) => el("option", { value, textContent: label })));
   if (narrator in o.voices) filmVoice.value = narrator;
-  if (!(color in o.colors)) color = DEFAULT_CAPTION_COLOR;
-  swatches.replaceChildren(
-    ...Object.entries(o.colors).map(([name, hex]) => {
-      const title = CAPTION_COLOR_LABELS[name] ?? name;
-      const b = el("button", { type: "button", title });
-      b.setAttribute("role", "radio");
-      b.setAttribute("aria-checked", String(name === color));
-      b.setAttribute("aria-label", title);
-      b.dataset.color = name;
-      b.style.setProperty("--c", hex);
-      return b;
-    }),
-  );
+  if (!(color in o.colors) && !HEX_RE.test(color)) color = DEFAULT_CAPTION_COLOR;
+  syncSwatches();
   // Nine anchor dots over a frame shaped like the chosen aspect ratio.
   positionFrame.replaceChildren(
     ...o.logo_positions.map((pos) => {
@@ -1119,13 +1217,6 @@ function shapeFrame() {
   thumbFrame.style.aspectRatio = positionFrame.style.aspectRatio;
 }
 
-swatches.addEventListener("click", (e) => {
-  const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
-  if (!b) return;
-  color = b.dataset.color ?? "";
-  swatches.querySelectorAll("button").forEach((o) => o.setAttribute("aria-checked", String(o === b)));
-  progress();
-});
 
 positionFrame.addEventListener("click", (e) => {
   const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
@@ -1184,6 +1275,7 @@ function setStarted(value: boolean) {
 }
 
 function progress() {
+  syncPresetGrid();
   captionStylePreview.dataset.style = captionAnimation;
   captionStylePreview.dataset.font = captionFont.value || DEFAULT_CAPTION_FONT;
   captionStylePreview.style.setProperty("--caption-font-scale", String(options?.font_sizes?.[captionFont.value] ?? 1));
@@ -1195,7 +1287,9 @@ function progress() {
   settingsSummary.textContent = summarizeSettings();
   captionStylePreview.dataset.display = captionMode.value;
   captionStylePreview.dataset.case = sel.case.value;
-  captionStylePreview.style.setProperty("--caption-preview-accent", options?.colors[color] ?? "");
+  captionStylePreview.style.setProperty("--caption-preview-accent", colorHex(color));
+  // Light highlighter colours carry dark letters; the rest keep white letters.
+  captionStylePreview.dataset.lightAccent = String(!!colorHex(color) && isLightColor(colorHex(color)));
   const staleCaptionEngine = options !== null && !captionEngineReady();
   if (captionStyleStatus.hidden === staleCaptionEngine) {
     captionStyleStatus.hidden = !staleCaptionEngine;
@@ -1374,7 +1468,8 @@ function settings() {
       title_style: thumbTextMode.value === "none" ? "none" : sel.titleStyle.value,
       text: thumbTextMode.value === "manual" ? thumbText.value.trim() : "",
       text_mode: thumbTextMode.value,
-      sequence: thumbNumber.value,
+      // Clips are separate moments, so their thumbnails are never numbered.
+      sequence: "off",
       position: thumbPosition,
       voice: sel.voice.value === "none" ? null : sel.voice.value,
     },
@@ -1475,7 +1570,7 @@ function resetAll(focus = true, keepSource = false) {
   sel.titleStyle.value = THUMBNAIL_DEFAULTS.titleStyle;
   sel.voice.value = THUMBNAIL_DEFAULTS.voice;
   color = DEFAULT_CAPTION_COLOR;
-  swatches.querySelectorAll("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.color === color)));
+  syncSwatches();
   imageInput.value = "";
   thumbText.value = "";
   thumbTextMode.value = "auto";
@@ -1527,6 +1622,8 @@ document.querySelectorAll<HTMLButtonElement>(".mode-select button").forEach((cho
     ? "bikin alur cerita film jadi serial konten"
     : "potong moment menarik dari video panjang";
   $<HTMLElement>("#thumb-dubbing").hidden = mode === "filming";
+  // Numbering thumbnails only makes sense for a filming series.
+  $<HTMLElement>("#thumb-sequence").hidden = mode !== "filming";
   const wasOpen = steps.start.classList.contains("show");
   const keyVisible = steps.key.classList.contains("show");
   Object.values(steps).forEach((step) => step.classList.remove("show"));
@@ -1640,6 +1737,7 @@ function projectCard(p: Project): HTMLLIElement {
           : typeof body?.detail === "string" ? body.detail : `status ${response.status}`);
       }
       const queued: Project = await response.json();
+      updatePreviewProject(queued);
       const node = projectCard(queued);
       projectCards.set(queued.id, { signature: JSON.stringify(queued), node });
       const previous = moreButton.closest(".project");
@@ -1653,25 +1751,32 @@ function projectCard(p: Project): HTMLLIElement {
   });
   const more = el("div", { className: "project-more" }, moreButton, moreCount);
   // Older servers do not report can_more; infer it so the control is never silently missing.
-  const canMore = p.can_more ?? ((["done", "error"] as string[]).includes(p.status) && p.settings.mode !== "filming");
+  const canMore = !isProjectProcessing(p) && (p.can_more ?? (["done", "error"].includes(p.status) && p.settings.mode !== "filming"));
   const source = el("div", { className: "project-source" }, cover, dashboard, canMore && more, canMore && moreError);
 
   const removable = p.status === "cancelled" || p.status === "error";
   const hasProjectControl = running || removable;
-  const control = el("button", { type: "button", className: "text-button project-control", textContent: removable ? "hapus" : p.status === "stopping" ? "menghentikan…" : "stop" });
+  // A stop icon while working; once stopped it turns into an X that deletes the project.
+  const controlLabel = removable ? "Hapus project" : p.status === "stopping" ? "Menghentikan…" : "Hentikan proses";
+  const control = el("button", { type: "button", className: `icon-button project-control${removable ? " is-danger" : ""}`, title: controlLabel, ariaLabel: controlLabel },
+    icon(removable ? "close" : "stop"));
   control.hidden = !running && !removable;
   control.disabled = p.status === "stopping";
   control.addEventListener("click", async () => {
-    if (removable && !window.confirm("Hapus proyek ini beserta hasilnya?")) return;
+    if (removable) {
+      if (await askDeleteProject(p)) await refreshProjects();
+      return;
+    }
     control.disabled = true;
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(p.id)}${removable ? "" : "/stop"}`, { method: removable ? "DELETE" : "POST" });
+      const response = await fetch(`/api/projects/${encodeURIComponent(p.id)}/stop`, { method: "POST" });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
         throw new Error(typeof body?.detail === "string" ? body.detail : `status ${response.status}`);
       }
       if (!removable) {
         const stopped: Project = await response.json();
+        updatePreviewProject(stopped);
         const node = projectCard(stopped);
         projectCards.set(stopped.id, { signature: JSON.stringify(stopped), node });
         const previous = control.closest(".project");
@@ -1718,7 +1823,7 @@ async function refreshProjects() {
   const refresh = ++projectRefresh;
   clearTimeout(polling);
   try {
-    const res = await fetch("/api/projects");
+    const res = await fetch("/api/projects", { cache: "no-store" });
     if (!res.ok) throw new Error(String(res.status));
     const list: Project[] = await res.json();
     if (!options && list.length) await loadOptions().catch(() => {});
@@ -1726,6 +1831,7 @@ async function refreshProjects() {
     projectsPanel.hidden = list.length === 0;
     updateResultsPanel();
     const cards = list.map((project) => {
+      updatePreviewProject(project);
       const signature = JSON.stringify(project);
       const cached = projectCards.get(project.id);
       if (cached?.signature === signature) return cached.node;
@@ -1745,7 +1851,7 @@ async function refreshProjects() {
       }
     }
     for (const id of projectCards.keys()) if (!list.some((p) => p.id === id)) projectCards.delete(id);
-    const active = list.some((p) => !["done", "error", "cancelled"].includes(p.status));
+    const active = list.some(isProjectProcessing);
     polling = window.setTimeout(refreshProjects, active ? 1500 : 15000);
   } catch {
     // The API may be restarting; try again shortly.
@@ -1753,6 +1859,8 @@ async function refreshProjects() {
   }
 }
 refreshProjects();
+// The dashboard can delete a project too; the list follows.
+window.addEventListener("clipy:project-deleted", () => { void refreshProjects(); });
 
 // Avoid opening the phone keyboard before the user chooses link or upload.
 if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) input.focus();

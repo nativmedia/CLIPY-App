@@ -96,7 +96,7 @@ data-width="{width}" data-height="{height}" data-fps="30">{body}</div>
 
 def caption_composition(folder, words, style, width, height, duration, *, stacked=False):
     font = style.font if style.font in captions.FONTS else "montserrat"
-    color = captions.COLORS.get(style.color, "#FFFFFF")
+    color = captions.color_hex(style.color) or "#FFFFFF"
     center = (height * (0.17 + (style.position - 1) * .11) if style.position is not None else
               height * .88 if stacked else captions.layout_for(width, height).baseline)
     animation = "pop" if style.animation == "word" else style.animation

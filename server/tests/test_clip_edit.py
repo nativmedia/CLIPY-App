@@ -48,7 +48,9 @@ class ClipEditTests(unittest.TestCase):
     def test_saving_a_longer_range_rerenders_with_a_fresh_source(self):
         p = self.project()
         projects.edit(p, 1, 95.0, 150.0, [])
-        self.assertEqual((p.clips[0]["start"], p.clips[0]["end"]), (95.0, 150.0))
+        clip = p.clips[0]
+        self.assertEqual((clip["start"], clip["end"]), (100.0, 140.0))
+        self.assertEqual((clip["pending_edit"]["start"], clip["pending_edit"]["end"]), (95.0, 150.0))
         self.assertFalse((p.dir / "src_1.mp4").exists())
         self.assertEqual(projects._queue.get_nowait(), ("retry", p.id, 1))
 
@@ -67,7 +69,7 @@ class ClipEditTests(unittest.TestCase):
                                             {"start": 101, "end": 101.8, "text": "", "orig": "empat"}])
         self.assertTrue((p.dir / "src_1.mp4").exists())  # same range keeps the cut source
         caption = [Word("tiga", 0, .8), Word("empat", 1, 1.8), Word("lima", 2, 2.8)]
-        fixed = projects.apply_caption_fixes(caption, p.clips[0]["caption_fixes"], 100.0)
+        fixed = projects.apply_caption_fixes(caption, p.clips[0]["pending_edit"]["caption_fixes"], 100.0)
         self.assertEqual([w.text for w in fixed], ["Tigaa", "lima"])
         saved = json.loads((p.dir / "words.json").read_text(encoding="utf-8"))
         self.assertEqual(saved[2]["text"], "Tigaa")
@@ -91,13 +93,48 @@ class ClipEditTests(unittest.TestCase):
             self.assertEqual((data["from"], data["to"], data["offset"]), (40.0, 200.0, 40.0))
             out = projects.edit_preview_file(p, 1)
             self.assertAlmostEqual(projects.media.probe_duration(out), 160.0, delta=0.5)
-            self.assertEqual(projects.edit_preview(p, 1)["url"], data["url"])  # cached
+            height = subprocess.check_output(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=height", "-of", "default=nw=1:nk=1", str(out)], text=True,
+            )
+            self.assertEqual(height.strip(), "180")
+            p.clips[0].update(start=101.0, end=139.0)
+            with patch.object(projects.subprocess, "run", side_effect=AssertionError("covered preview encoded again")):
+                # The editor receives the cached media's original clock.
+                self.assertEqual(projects.edit_preview(p, 1), data)
 
     def test_editing_waits_for_a_running_project(self):
         p = self.project()
         p.status = "clipping"
         with self.assertRaises(ValueError):
             projects.edit(p, 1, 100.0, 140.0, [])
+
+    def test_unchanged_edit_skips_the_render_queue(self):
+        p = self.project()
+        (p.dir / p.clips[0]["video"]).write_bytes(b"previous")
+        projects.edit(p, 1, 100.0, 140.0, [])
+        self.assertTrue(projects._queue.empty())
+        self.assertEqual(p.status, "done")
+
+    def test_failed_render_keeps_published_range_and_video_for_retry(self):
+        p = self.project()
+        clip = p.clips[0]
+        old_video = p.dir / clip["video"]
+        old_video.write_bytes(b"previous")
+        projects.edit(p, 1, 102.0, 138.0, [])
+
+        def fail(project, draft, *_):
+            draft.pop("video")
+            project.save()
+            self.assertEqual(projects._checkpoint(p.id).clips[0]["video"], old_video.name)
+            raise PermissionError("locked")
+
+        with patch.object(projects, "_make_clip", side_effect=fail), patch.object(projects.traceback, "print_exc"):
+            projects._attempt_clip(p, clip, [], {}, .45, .55)
+        self.assertEqual((clip["start"], clip["end"], clip["status"]), (100.0, 140.0, "error"))
+        self.assertIn(old_video.name, p.public()["clips"][0]["video"])
+        self.assertEqual(clip["pending_edit"]["start"], 102.0)
+        self.assertEqual(old_video.read_bytes(), b"previous")
 
 
 if __name__ == "__main__":

@@ -396,7 +396,7 @@ async def create_project(
     if s.mode == "filming" and (not s.film or s.film.voice not in tts.VOICES):
         raise HTTPException(400, "choose valid filming settings and a narrator voice")
     if ((c.animation not in captions.ANIMATIONS and c.animation not in captions.ANIMATION_ALIASES)
-            or c.color not in captions.COLORS or c.case not in captions.CASES
+            or captions.color_hex(c.color) is None or c.case not in captions.CASES
             or (c.font not in captions.CAPTION_FONTS and c.font not in captions.FONT_ALIASES)):
         raise HTTPException(400, "unknown caption option")
     c.font = captions.normalize_font(c.font)
@@ -608,15 +608,18 @@ def restart_project(project_id: str):
 
 
 @app.delete("/api/projects/{project_id}")
-def delete_stopped_project(project_id: str):
+def delete_project(project_id: str, files: bool = False):
+    """Delete a finished or stopped project; ``?files=true`` also removes its export folder."""
     p = projects.get(project_id)
     if not p:
         raise HTTPException(404, "project not found")
     try:
-        projects.delete_stopped(p)
+        result = projects.delete(p, remove_files=files)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
-    return {"ok": True}
+    except OSError as e:
+        raise HTTPException(503, f"File belum bisa dihapus: {e}") from e
+    return {"ok": True, **result}
 
 
 @app.get("/api/projects/{project_id}/posts")

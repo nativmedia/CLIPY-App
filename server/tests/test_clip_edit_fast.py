@@ -73,6 +73,7 @@ class FastEditTests(unittest.TestCase):
         clip = p.clips[0]
         self.assertEqual(clip["status"], "done", clip.get("error"))
         thumb_before = (p.dir / clip["thumb"]).stat().st_mtime
+        previous_video = p.dir / clip["video"]
 
         analysed = []
         real_plan = framing.plan_crop
@@ -85,13 +86,16 @@ class FastEditTests(unittest.TestCase):
             raise AssertionError("an edit must not run this again")
 
         projects.edit(p, 1, 8.0, 20.0, [{"start": 12.0, "end": 12.4, "text": "BENAR", "orig": "kata24"}])
-        with patch.object(framing, "plan_crop", counting_plan), \
+        with previous_video.open("rb"), patch.object(framing, "plan_crop", counting_plan), \
              patch.object(projects, "_transcribe_clip", no), \
              patch.object(emphasis, "ai_keywords", no), \
              patch.object(thumbs, "add_title", no):
             projects._retry(p, 1)
         clip = p.clips[0]
         self.assertEqual(clip["status"], "done", clip.get("error"))
+        self.assertNotEqual(clip["video"], previous_video.name)
+        self.assertTrue(previous_video.is_file())
+        self.assertFalse(projects.migrate_clip_assets(p))
         self.assertAlmostEqual(media.probe_duration(p.dir / clip["video"]), 12.0, delta=0.3)
         # Only the two added stretches (2 s each) were analysed for framing.
         self.assertEqual(len(analysed), 2)

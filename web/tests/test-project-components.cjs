@@ -17,7 +17,9 @@ test("React project islands preserve settings, preview, retry and cleanup", asyn
     external: ["react", "react/*", "react-dom", "react-dom/*"],
     plugins: [{ name: "editor-boundary", setup(builder) {
       builder.onResolve({ filter: /^\.\/editor$/ }, () => ({ path: "editor", namespace: "test" }));
-      builder.onLoad({ filter: /.*/, namespace: "test" }, () => ({ contents: 'exports.clipLayout = () => "9:16 · no crop · blur"', loader: "js" }));
+      builder.onLoad({ filter: /.*/, namespace: "test" }, () => ({
+        contents: 'exports.clipLayout = () => "9:16 · no crop · blur"; exports.isProjectProcessing = () => false;', loader: "js",
+      }));
     } }],
   });
   const compiled = new Module(path.join(process.cwd(), "tests", "react-bundle.cjs"), module);

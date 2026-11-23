@@ -111,7 +111,9 @@ class Project:
         return Path(self.export_dir) / f"CLIPY-{safe_title}-{self.id}"
 
     def clip_asset_name(self, clip: dict, extension: str) -> str:
-        return f"{clip_file_stem(clip)}.{extension.lstrip('.')}"
+        revision = clip.get("asset_revision")
+        suffix = f" (edit {revision})" if revision else ""
+        return f"{clip_file_stem(clip)}{suffix}.{extension.lstrip('.')}"
 
     def clip_asset_path(self, clip: dict, extension: str) -> Path:
         return self.dir / self.clip_asset_name(clip, extension)
@@ -135,6 +137,7 @@ class Project:
         else:
             d["thumbnail"] = self.file_url("poster.jpg") if (self.dir / "poster.jpg").exists() else ""
         for c in d["clips"]:
+            c.pop("pending_edit", None)
             for key in ("video", "thumb", "srt", "ass"):
                 if c.get(key):
                     c[key] = self.file_url(c[key])
@@ -195,6 +198,14 @@ def stop(p: Project) -> Project:
                 current.save()
                 _projects[p.id] = current
                 return current
+            edits = [clip for clip in current.clips if clip.get("pending_edit") and clip.get("status") in ("pending", "rendering")]
+            if edits:
+                for clip in edits:
+                    clip.update(status="error", error="Render ulang dihentikan.")
+                current = replace(current, status="done", stage="done", progress=1.0, error=None)
+                current.save()
+                _projects[p.id] = current
+                return current
             clips = [clip if clip.get("status") == "done" else
                      {**clip, "status": "cancelled", "video": None, "thumb": None, "srt": None}
                      for clip in current.clips]
@@ -211,16 +222,34 @@ def _active_running(project_id: str) -> bool:
     return True if poll is None else poll() is None
 
 
-def delete_stopped(p: Project) -> None:
+def delete(p: Project, remove_files: bool = False) -> dict:
+    """Remove a project that is not working, and with ``remove_files`` its export folder too.
+
+    The export folder is only removed when it is exactly the folder CLIPY made
+    for this project (``CLIPY-<title>-<id>`` inside the chosen folder).
+    """
     with _lock:
         current = _projects.get(p.id)
-        if (current is None or current.status not in ("cancelled", "error")
-                or _active_running(current.id)):
-            raise ValueError("Tunggu hingga proses berhenti")
+        if current is None or current.status not in TERMINAL or _active_running(current.id):
+            raise ValueError("Hentikan proses dulu sebelum menghapus proyek")
         if p.dir.resolve().parent != DATA_DIR.resolve() or p.dir.is_symlink():
             raise ValueError("Folder proyek tidak valid")
+        output = current.export_output_dir if remove_files else None
+        files_removed = False
+        if output is not None and output.exists():
+            base = Path(current.export_dir).expanduser().resolve()
+            if (output.is_symlink() or output.resolve().parent != base
+                    or not output.name.startswith("CLIPY-") or not output.name.endswith(current.id)):
+                raise ValueError("Folder hasil tidak valid, tidak dihapus")
+            shutil.rmtree(output)
+            files_removed = True
         shutil.rmtree(p.dir)
         _projects.pop(p.id, None)
+        return {"files_removed": files_removed}
+
+
+def delete_stopped(p: Project) -> None:
+    delete(p)
 
 
 def _checkpoint(project_id: str) -> Project | None:
@@ -238,6 +267,9 @@ def _load(*, interrupted: bool = False) -> None:
             continue
         if interrupted and p.status not in TERMINAL:
             p.status, p.error, p.stage = "error", "interrupted: the server restarted", "interrupted"
+            for clip in p.clips:
+                if clip.get("pending_edit") and clip.get("status") in ("pending", "rendering"):
+                    clip.update(status="error", error="Render ulang terputus saat server dimulai ulang.")
             p.save()
         if p.status in TERMINAL and migrate_clip_assets(p):
             p.save()
@@ -248,7 +280,7 @@ def migrate_clip_assets(p: Project) -> bool:
     """Give legacy final outputs the same readable names used by new projects."""
     changed = False
     for clip in p.clips:
-        if not isinstance(clip.get("n"), int):
+        if not isinstance(clip.get("n"), int) or clip.get("asset_revision"):
             continue
         n = clip["n"]
         for key, extension, legacy in (
@@ -264,7 +296,11 @@ def migrate_clip_assets(p: Project) -> bool:
                 continue
             target = p.clip_asset_path(clip, extension)
             if source != target and not target.exists():
-                source.replace(target)
+                try:
+                    source.replace(target)
+                except PermissionError:
+                    # Leave a playable legacy file in place while Windows is serving it.
+                    continue
             if target.is_file() and clip.get(key) != target.name:
                 clip[key] = target.name
                 changed = True
@@ -664,9 +700,21 @@ def _run(p: Project) -> None:
 
 def _attempt_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: float, share: float) -> None:
     clip.pop("error", None)
-    clip.pop("note", None)
+    draft = clip.get("pending_edit")
+    rendered = clip
+    if draft is not None or clip.get("edited"):
+        # Keep the published range and assets available until the new render has
+        # completely finished. Windows can keep the old MP4 open during playback.
+        rendered = {**clip, **(draft or {}), "asset_revision": uuid.uuid4().hex[:8],
+                    "edited": True, "fast_edit": True}
+        rendered.pop("pending_edit", None)
+        clip["status"] = "rendering"
+    rendered.pop("note", None)
     try:
-        _make_clip(p, clip, words, opts, base, share)
+        _make_clip(p, rendered, words, opts, base, share)
+        if rendered is not clip:
+            clip.clear()
+            clip.update(rendered)
         clip["status"] = "done"
     except Exception as e:
         traceback.print_exc()
@@ -727,13 +775,13 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
         caption_words = captions.expand_coarse_words(laughter.caption_words(src, local, duration))
         caption_words = apply_caption_fixes(caption_words, clip.get("caption_fixes") or [], clip["start"])
         emphasized = emphasis.choose(src, caption_words, getattr(p, "language", None))
-    _save_caption_words(p, clip, caption_words, emphasized)
     ass = p.clip_asset_path(clip, "ass")
     srt = p.clip_asset_path(clip, "srt")
     ass.write_text(captions.build_ass(caption_words, opts["style"], width, height, emphasized=emphasized), encoding="utf-8")
 
     source_ratio = film._source_ratio(src) if clip_ratio is not None else None
     plan = None
+    key = None
     if fit == "crop" and clip_ratio not in ("none", "blackbar"):
         clip["status"] = "framing"
         try:
@@ -743,7 +791,6 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
             plan = _reuse_plan(p, clip, src, key, local) if fast else None
             if plan is None:
                 plan = framing.plan_crop(src, frame_width, frame_height, local)
-            _save_plan(p, clip, plan, key)
         except Exception:
             # Framing is a nicety; a centre crop is still a usable short.
             traceback.print_exc()
@@ -751,7 +798,9 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
 
     clip["status"] = "rendering"
     voice = thumb_cfg.get("voice")
-    body = d / f"body_{n}.mp4"
+    out = p.clip_asset_path(clip, "mp4")
+    revision = clip.get("asset_revision")
+    body = out if revision and not voice else d / (f"body_{n}-{revision}.mp4" if revision else f"body_{n}.mp4")
     # Without a dubbed intro, the title shows over the opening seconds instead.
     title = None if voice else thumbs.title_overlay(d / f"title_{n}.png", width, height, clip["title"], thumb_cfg.get("title_style", "bold"))
     media.render_clip(src, ass, body, width, height, fit, _span(p, base + share * 0.4, base + share * 0.85),
@@ -778,7 +827,6 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
             thumbs.add_brand(thumb, opts["brand"], opts["brand_position"], media.brand_margin(width, height))
     clip["thumb"] = thumb.name
 
-    out = p.clip_asset_path(clip, "mp4")
     intro_duration = 0.0
     if voice:
         clip["status"] = "dubbing"
@@ -793,7 +841,7 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
         else:
             body.unlink(missing_ok=True)
             clip["intro_duration"] = intro_duration
-    if not intro_duration:
+    if not intro_duration and body != out:
         body.replace(out)
     if getattr(p, "music", None):
         mixed = d / f"clip_{n}_music.mp4"
@@ -804,6 +852,12 @@ def _make_clip(p: Project, clip: dict, words: list[Word], opts: dict, base: floa
                                          offset=intro_duration, emphasized=emphasized), encoding="utf-8")
     srt.write_text(captions.build_srt(caption_words, opts["style"], width, height, offset=intro_duration,
                                       emphasized=emphasized), encoding="utf-8")
+    _save_caption_words(p, clip, caption_words, emphasized)
+    if key is not None:
+        try:
+            _save_plan(p, clip, plan, key)
+        except OSError:
+            traceback.print_exc()
     clip["srt"], clip["ass"] = srt.name, ass.name
     clip["video"] = out.name
     p.progress = base + share
@@ -862,7 +916,7 @@ def sequence_parts(p: Project) -> list[tuple[Path, float]]:
         if not video.is_file():
             raise ValueError(f"Video klip {n} tidak tersedia")
         body = p.dir / f"body_{n}.mp4"
-        if body.is_file():
+        if not clip.get("asset_revision") and body.is_file():
             parts.append((body, 0.0))
         elif clip.get("intro_duration"):
             parts.append((video, clip["intro_duration"]))
@@ -1037,11 +1091,21 @@ def _reuse_plan(p: Project, clip: dict, src: Path, key: dict, local: list[Word])
 def _edit_window(p: Project, n: int, start: float, end: float) -> tuple[Path, float] | None:
     """The full-quality stretch the editor downloaded, when it covers [start, end]."""
     path, meta = p.dir / f"edit_window_{n}.mp4", _preview_path(p, n).with_suffix(".json")
-    if not (path.exists() and meta.exists()):
+    if not path.exists():
         return None
-    data = json.loads(meta.read_text(encoding="utf-8"))
-    if data["from"] - .01 <= start and end <= data["to"] + .01:
-        return path, float(data["from"])
+    data = _cached_edit_range(meta, start, end)
+    return (path, data["from"]) if data is not None else None
+
+
+def _cached_edit_range(meta: Path, start: float, end: float) -> dict[str, float] | None:
+    """Return the media's actual clock when the file covers the requested range."""
+    try:
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        lower, upper, offset = (float(data[key]) for key in ("from", "to", "offset"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if lower - .01 <= start <= end <= upper + .01 and abs(offset - lower) <= .01:
+        return {"from": lower, "to": upper, "offset": offset}
     return None
 
 
@@ -1142,10 +1206,10 @@ def _caption_look(p: Project) -> dict:
     return {
         "font": font,
         "accent_font": captions.strong_font_for(spec, font),
-        "accent": captions.COLORS.get(style.color, captions.COLORS[captions.DEFAULT_COLOR]),
+        "accent": captions.accent_hex(style.color),
         "case": spec.case or style.case,
         "position": style.position,
-        "display": style.display or "sentence",
+        "display": "word" if animation == "punchy" else (style.display or "sentence"),
         "animation": animation,
         "size": captions.CAPTION_FONTS[font].size,
         "max_lines": min(style.max_lines, captions.MAX_LINES),
@@ -1177,9 +1241,9 @@ def _edit_preview(p: Project, n: int) -> dict:
     lo, hi = info["window"]
     out = _preview_path(p, n)
     meta = out.with_suffix(".json")
-    if out.exists() and meta.exists():
-        saved = json.loads(meta.read_text(encoding="utf-8"))
-        if abs(saved["from"] - lo) < .01 and abs(saved["to"] - hi) < .01:
+    if out.exists():
+        saved = _cached_edit_range(meta, lo, hi)
+        if saved is not None:
             return {**saved, "url": f"/api/projects/{p.id}/clips/{n}/edit/preview.mp4"}
     part = p.dir / f"edit_preview_{n}.part.mp4"
     part.unlink(missing_ok=True)
@@ -1194,7 +1258,8 @@ def _edit_preview(p: Project, n: int) -> dict:
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-v", "error", "-ss", f"{skip:.3f}", "-i", str(source), "-t", f"{hi - lo:.3f}",
-             "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:540,fps=30", "-c:v", "libx264", "-preset", "veryfast",
+             "-map", "0:v:0", "-map", "0:a:0?", "-vf", r"scale=-2:trunc(min(ih\,540)/2)*2,fps=30",
+             "-c:v", "libx264", "-preset", "veryfast",
              "-crf", "28", "-g", "15", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
              "-movflags", "+faststart", str(part)],
             check=True,
@@ -1217,7 +1282,7 @@ def edit_preview_file(p: Project, n: int) -> Path | None:
 
 
 def edit(p: Project, n: int, start: float, end: float, fixes: list[dict]) -> None:
-    """Save a new range and caption fixes, then render the clip again in place."""
+    """Queue an edit while the last published clip remains playable."""
     clip = next(c for c in p.clips if c["n"] == n)
     info = edit_info(p, n)
     start, end = round(float(start), 3), round(float(end), 3)
@@ -1227,26 +1292,26 @@ def edit(p: Project, n: int, start: float, end: float, fixes: list[dict]) -> Non
         raise ValueError(f"Clip minimal {EDIT_MIN_DURATION:g} detik")
     if end - start > info["max_duration"] + .01:
         raise ValueError(f"Clip maksimal {info['max_duration']:g} detik sesuai pengaturan proyek")
-    kept = [f for f in clip.get("caption_fixes") or []
-            if not any(abs(float(f["start"]) - float(x["start"])) < .05 for x in fixes)]
     clean = [{"start": round(float(f["start"]), 3), "end": round(float(f["end"]), 3),
               "text": str(f.get("text", ""))[:600], "orig": str(f.get("orig", ""))[:600],
               **({"kind": "line"} if f.get("kind") == "line" else {})} for f in fixes]
-    moved = abs(start - float(clip["start"])) > .001 or abs(end - float(clip["end"])) > .001
     with _lock:
         if _projects.get(p.id) is not p or p.status not in ("done", "error") or (_active and _active[0] == p.id):
             raise ValueError("Tunggu hingga proses project selesai")
-        clip["caption_fixes"] = kept + clean
-        clip["start"], clip["end"] = start, end
-        clip["edited"] = True
-        clip["fast_edit"] = True
+        previous = clip.get("pending_edit") or clip
+        moved = (abs(start - float(previous["start"])) > .001
+                 or abs(end - float(previous["end"])) > .001)
+        if not moved and not clean and clip.get("status") == "done" and clip.get("video") and (p.dir / clip["video"]).is_file():
+            return
         if moved:
-            # The cut source covers the old range only; fetch it again.
+            # The cached cut can belong to the last attempted range.
             for stale in (p.dir / f"src_{n}.mp4", p.dir / f"src_{n}_active.mp4"):
                 stale.unlink(missing_ok=True)
+        kept = [f for f in previous.get("caption_fixes") or []
+                if not any(abs(float(f["start"]) - float(x["start"])) < .05 for x in clean)]
+        clip["pending_edit"] = {"start": start, "end": end, "caption_fixes": kept + clean}
         _fix_transcript(p, clean)
-        p.save()
-    retry(p, n)
+        retry(p, n)
 
 
 def _fix_transcript(p: Project, fixes: list[dict]) -> None:
@@ -1312,7 +1377,7 @@ def _retry(p: Project, n: int) -> None:
     clip = next(c for c in p.clips if c["n"] == n)
     lo, hi = STAGES["clipping"]
     _attempt_clip(p, clip, _load_words(p), _clip_options(p), lo, hi - lo)
-    if any(c.get("status") == "done" for c in p.clips):
+    if any(c.get("status") == "done" or c.get("video") for c in p.clips):
         p.status, p.stage, p.progress, p.error = "done", "done", 1.0, None
         _export_results(p)
     else:
@@ -1398,6 +1463,9 @@ def _more(p: Project, count: int) -> None:
 
 
 def _fail(p: Project, error: str) -> None:
+    for clip in p.clips:
+        if clip.get("pending_edit") and clip.get("status") in ("pending", "rendering"):
+            clip.update(status="error", error=error)
     p.status, p.stage, p.error, p.more_from = "error", "failed", error, None
     p.save()
 

@@ -1,9 +1,10 @@
 /**
  * Result views: the clip preview pop-up and the project editor page, where each finished
- * clip sits next to editable short, medium and long descriptions.
+ * clip has three editable description options.
  */
 
 import { openClipEditor } from "./clip-editor";
+import { askDeleteProject, icon } from "./project-delete";
 
 export type Clip = {
   n: number;
@@ -71,7 +72,8 @@ export function clipLayout(settings: Project["settings"]): string {
   return `${crop === "none" ? "no crop" : crop} · hasil ${ratio} · ${color}`;
 }
 
-type LengthName = "pendek" | "sedang" | "panjang";
+const descriptionOptions = { pendek: "Opsi 1", sedang: "Opsi 2", panjang: "Opsi 3" } as const;
+type DescriptionField = keyof typeof descriptionOptions;
 type DashboardText = { title?: string; pendek: string; sedang: string; panjang: string };
 type DashboardTexts = Record<string, DashboardText>;
 
@@ -99,26 +101,57 @@ const modal = $<HTMLDivElement>("#preview-modal");
 const modalVideo = $<HTMLVideoElement>("#modal-video");
 const modalTitle = $<HTMLParagraphElement>("#modal-title");
 const modalEdit = $<HTMLButtonElement>("#modal-edit");
-let modalProject = "";
-let modalClip: Clip | null = null;
-let modalRatio = "9:16";
-let modalCanEdit = false;
+const modalEditStatus = $<HTMLParagraphElement>("#modal-edit-status");
+let preview: { project: Project; clip: Clip; request?: AbortController; error?: string } | null = null;
 
-function canEditClip(project: Project, clip: Clip) {
-  return clip.status === "done" && !!clip.video && project.settings.mode !== "filming"
-    && ["done", "error", "cancelled"].includes(project.status);
+export function isProjectProcessing(project: Project): boolean {
+  return !["done", "error", "cancelled"].includes(project.status) || project.export_status === "copying";
+}
+
+function hasClipEditor(project: Project, clip: Clip): boolean {
+  return clip.status === "done" && !!clip.video && project.settings.mode !== "filming";
+}
+
+const clipEditTitle = "Perpanjang/potong clip dan perbaiki caption";
+
+function clipEditBlock(project: Project): string {
+  if (project.status === "cancelled") return "Pengeditan tidak tersedia karena proyek dihentikan.";
+  return isProjectProcessing(project) ? "Tunggu proses proyek selesai untuk mengedit." : "";
+}
+
+function updatePreviewEdit(): void {
+  if (!preview) return;
+  const available = hasClipEditor(preview.project, preview.clip);
+  const blocked = available ? clipEditBlock(preview.project) : "";
+  const message = blocked || (available ? preview.error : "") || "";
+  modalEdit.hidden = !available;
+  modalEdit.disabled = !available || !!blocked || !!preview.request;
+  modalEdit.textContent = preview.request ? "Membuka…" : "Edit";
+  modalEdit.title = available ? blocked || clipEditTitle : "";
+  modalEditStatus.hidden = !message;
+  if (modalEditStatus.textContent !== message) modalEditStatus.textContent = message;
+  modalEditStatus.classList.toggle("error", !!preview.error && !blocked);
+}
+
+/** Keep the Edit control current without interrupting video playback. */
+export function updatePreviewProject(project: Project): void {
+  const current = preview;
+  if (!current || current.project.id !== project.id) return;
+  const clip = project.clips.find((item) => item.n === current.clip.n);
+  if (!clip?.video) {
+    closePreview();
+    return;
+  }
+  current.project = project;
+  current.clip = clip;
+  updatePreviewEdit();
 }
 
 export function openPreview(project: Project, clip: Clip) {
   if (!clip.video) return;
-  modalProject = project.id;
-  modalClip = clip;
-  modalRatio = project.settings.clip.ratio;
-  modalCanEdit = canEditClip(project, clip);
-  modalEdit.disabled = false;
-  modalEdit.textContent = modalCanEdit ? "edit" : "open project";
-  modalEdit.classList.toggle("clip-edit", modalCanEdit);
-  modalEdit.title = modalCanEdit ? "Perpanjang/potong clip dan perbaiki caption" : "Buka dashboard project";
+  preview?.request?.abort();
+  preview = { project, clip };
+  updatePreviewEdit();
   modalVideo.src = clip.video;
   modalVideo.poster = clip.thumb ?? "";
   modalVideo.style.aspectRatio = project.settings.clip.ratio.replace(":", " / ");
@@ -126,39 +159,56 @@ export function openPreview(project: Project, clip: Clip) {
   modal.hidden = false;
   document.body.classList.add("locked");
   modalVideo.play().catch(() => {});
-  $<HTMLButtonElement>("#modal-close").focus();
+  modal.querySelector<HTMLElement>(".modal-box")?.focus({ preventScroll: true });
 }
 
 function closePreview() {
   if (modal.hidden) return;
+  preview?.request?.abort();
+  preview = null;
   modalVideo.pause();
   modalVideo.removeAttribute("src");
   modalVideo.load();
   modal.hidden = true;
-  if (editor.hidden) document.body.classList.remove("locked");
+  if (editor.hidden && !document.querySelector(".modal:not([hidden]), .ce-modal")) document.body.classList.remove("locked");
 }
 
 $<HTMLButtonElement>("#modal-close").addEventListener("click", closePreview);
 modal.addEventListener("click", (e) => {
   if (e.target === modal) closePreview();
 });
+// Space plays/pauses the open preview instead of scrolling the page behind it.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== " " || modal.hidden) return;
+  const target = e.target as HTMLElement | null;
+  if (target?.closest("button, a[href], input, textarea, select, video, [contenteditable]")) return;
+  e.preventDefault();
+  if (modalVideo.paused) modalVideo.play().catch(() => {});
+  else modalVideo.pause();
+});
 modalEdit.addEventListener("click", async () => {
-  const id = modalProject;
-  if (!modalCanEdit || !modalClip) {
-    closePreview();
-    openEditor(id);
-    return;
-  }
-  modalEdit.disabled = true;
-  modalEdit.textContent = "membuka…";
+  const current = preview;
+  if (!current || modalEdit.disabled) return;
+  const { project, clip } = current;
+  const id = project.id;
+  const request = new AbortController();
+  current.request = request;
+  current.error = undefined;
+  updatePreviewEdit();
   modalVideo.pause();
   try {
     // After saving, the project page shows the re-render progress.
-    await openClipEditor(id, modalClip.n, modalRatio, () => openEditor(id));
-    closePreview();
+    await openClipEditor(id, clip.n, project.settings.clip.ratio, (pending) => {
+      if (editing !== id) openEditor(id);
+      else if (pending) followUntilDone(id);
+      else void renderEditor(id);
+    }, request.signal);
+    if (preview === current) closePreview();
   } catch (err) {
-    modalEdit.textContent = `edit gagal: ${(err as Error).message}`;
-    modalEdit.disabled = false;
+    if (preview !== current) return;
+    current.request = undefined;
+    current.error = `Edit gagal: ${(err as Error).message}`;
+    updatePreviewEdit();
   }
 });
 
@@ -225,40 +275,43 @@ async function copy(text: string, button: HTMLButtonElement) {
   setTimeout(() => (button.textContent = "copy"), 1400);
 }
 
-/** Three independently editable description lengths, shared by clips and sequence. */
+/** Three independently editable descriptions, shared by clips and sequence. */
 function postsPanel(projectId: string, n: string, values: DashboardText): HTMLElement {
   const box = el("div", { className: "posts" });
   const tabs = el("div", { className: "tabs" });
   tabs.setAttribute("role", "tablist");
-  tabs.setAttribute("aria-label", "Panjang deskripsi");
+  tabs.setAttribute("aria-label", "Pilihan deskripsi");
   const body = el("div", { className: "post-fields" });
   const status = el("span", { className: "save-status" });
   status.setAttribute("role", "status");
   const copyButton = el("button", { type: "button", className: "text-button", textContent: "copy" });
   let currentArea: HTMLTextAreaElement | null = null;
   copyButton.addEventListener("click", () => { if (currentArea) void copy(currentArea.value, copyButton); });
-  const show = (length: LengthName) => {
-    tabs.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.length === length)));
+  const show = (field: DescriptionField) => {
+    tabs.querySelectorAll("button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.field === field)));
     const area = el("textarea", {
-      value: values[length] ?? "", maxLength: { pendek: 70, sedang: 250, panjang: 600 }[length], spellcheck: true, rows: length === "pendek" ? 2 : length === "sedang" ? 4 : 6,
+      value: values[field] ?? "", maxLength: 600, spellcheck: true, rows: 2,
     });
-    area.setAttribute("aria-label", `Deskripsi ${length}`);
+    area.setAttribute("aria-label", `Deskripsi ${descriptionOptions[field]}`);
+    const wrapper = el("div", { className: "post-field description-field" }, area);
+    wrapper.dataset.value = area.value;
     currentArea = area;
     area.addEventListener("input", () => {
-      values[length] = area.value;
-      queueSave(projectId, n, length, area.value, status);
+      wrapper.dataset.value = area.value;
+      values[field] = area.value;
+      queueSave(projectId, n, field, area.value, status);
     });
-    body.replaceChildren(el("div", { className: "post-field" }, area));
+    body.replaceChildren(wrapper);
   };
-  for (const length of ["pendek", "sedang", "panjang"] as const) {
-    const b = el("button", { type: "button", textContent: length });
-    b.dataset.length = length;
+  for (const field of ["pendek", "sedang", "panjang"] as const) {
+    const b = el("button", { type: "button", textContent: descriptionOptions[field] });
+    b.dataset.field = field;
     b.setAttribute("role", "tab");
-    b.addEventListener("click", () => show(length));
+    b.addEventListener("click", () => show(field));
     tabs.append(b);
   }
-  box.append(el("div", { className: "field-head posts-head" }, el("span", { textContent: "deskripsi" }), tabs, copyButton), body, status);
-  show("sedang");
+  box.append(el("div", { className: "field-head posts-head" }, el("h4", { className: "posts-title", textContent: "Deskripsi" }), tabs, copyButton), body, status);
+  show("pendek");
   return box;
 }
 
@@ -272,11 +325,20 @@ function textPlaceholder(id: string): HTMLElement {
 function clipCard(p: Project, c: Clip): HTMLLIElement {
   const ratio = p.settings.clip.ratio.replace(":", " / ");
   const ratioValue = p.settings.clip.ratio.replace(":", "/");
+  const previousVersion = !!c.video && !["done", "error", "cancelled"].includes(c.status);
+  const renderNote = el("p", {
+    className: "hint",
+    role: "status",
+    hidden: !previousVersion,
+    textContent: "Render ulang berlangsung. Versi sebelumnya bisa diputar.",
+  });
+  const player = c.video ? el("video", {
+    src: c.video, poster: c.thumb ?? "", controls: true, preload: c.thumb ? "none" : "metadata", playsInline: true,
+  }) : null;
   let media: HTMLElement;
-  if (c.video) {
-    const v = el("video", { src: c.video, poster: c.thumb ?? "", controls: true, preload: "metadata", playsInline: true });
-    v.style.aspectRatio = ratio;
-    media = v;
+  if (player) {
+    player.style.aspectRatio = ratio;
+    media = player;
   } else {
     const empty = el("div", { className: "video-empty", textContent: c.status === "error" ? "failed" : c.status });
     empty.style.aspectRatio = ratio;
@@ -284,9 +346,10 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
   }
 
   const actions = el("div", { className: "clip-actions" });
-  if (c.status === "error") {
+  const playerFrame = player ? el("div", { className: "clip-player-frame" }, player) : null;
+  if (c.status === "error" && p.status !== "cancelled") {
     const retry = el("button", { type: "button", className: "text-button warn", textContent: "retry" });
-    const running = !["done", "error", "cancelled"].includes(p.status);
+    const running = isProjectProcessing(p);
     retry.disabled = running;
     if (running) retry.textContent = "tunggu proses selesai";
     retry.addEventListener("click", async () => {
@@ -294,6 +357,7 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
       retry.textContent = "retrying…";
       try {
         await retryClip(p.id, c.n);
+        if (player) renderNote.hidden = false;
         followUntilDone(p.id);
       } catch (err) {
         retry.textContent = `retry failed: ${(err as Error).message}`;
@@ -302,16 +366,25 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
     });
     actions.append(retry);
   }
-  if (c.status === "done" && c.video && p.settings.mode !== "filming") {
+  if (hasClipEditor(p, c)) {
     const edit = el("button", { type: "button", className: "text-button clip-edit", textContent: "edit" });
-    const running = !["done", "error", "cancelled"].includes(p.status);
-    edit.disabled = running;
-    edit.title = running ? "Tunggu proses selesai" : "Perpanjang/potong clip dan perbaiki caption";
+    const blocked = clipEditBlock(p);
+    edit.disabled = !!blocked;
+    edit.title = blocked || clipEditTitle;
     edit.addEventListener("click", async () => {
       edit.disabled = true;
       edit.textContent = "membuka…";
       try {
-        await openClipEditor(p.id, c.n, p.settings.clip.ratio, () => followUntilDone(p.id));
+        await openClipEditor(p.id, c.n, p.settings.clip.ratio, (pending) => {
+          if (pending) {
+            edit.disabled = true;
+            renderNote.hidden = false;
+            followUntilDone(p.id);
+          } else if (editing) {
+            void renderEditor(editing);
+          }
+        });
+        if (player && !player.paused) player.pause();
         edit.textContent = "edit";
       } catch (err) {
         edit.textContent = `edit gagal: ${(err as Error).message}`;
@@ -319,22 +392,28 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
         edit.disabled = false;
       }
     });
-    actions.append(edit);
+    playerFrame?.append(edit);
   }
 
 
   media.style.setProperty("--ar", ratioValue);
+  playerFrame?.style.setProperty("--ar", ratioValue);
   return el(
     "li",
     { className: "editor-clip" },
-    el("div", { className: "clip-media" }, media),
+    el("div", { className: "clip-media" }, playerFrame ?? media),
     el(
       "div",
       { className: "clip-body" },
       el("p", { className: "kicker" }, el("span", { textContent: `clip ${String(c.n).padStart(2, "0")} · ${clock(c.start)}–${clock(c.end)}` })),
       el("h3", { textContent: c.title }),
-      c.error ? el("p", { className: "hint error", textContent: c.error }) : null,
+      c.error ? el("p", {
+        className: "hint error",
+        textContent: c.video ? "Render ulang gagal. Versi sebelumnya masih bisa diputar." : c.error,
+        title: c.error,
+      }) : null,
       c.note ? el("p", { className: "hint", textContent: c.note }) : null,
+      renderNote,
       actions,
       c.video ? textPlaceholder(String(c.n)) : null,
     ),
@@ -342,22 +421,34 @@ function clipCard(p: Project, c: Clip): HTMLLIElement {
 }
 
 function resultStatus(p: Project): HTMLElement {
-  const complete = p.status === "done" && p.export_status !== "copying";
+  const stateName = isProjectProcessing(p) ? "processing" : p.status === "done" ? "complete" : p.status === "error" ? "failed" : "stopped";
+  const labels = { processing: "Sedang memproses", complete: "Proses selesai", failed: "Proses gagal", stopped: "Proses dihentikan" };
+  const icons = {
+    processing: '<circle cx="10" cy="10" r="7"/>',
+    complete: '<path d="m4 10 3.5 3.5L16 5"/>',
+    failed: '<path d="m5 5 10 10m0-10L5 15"/>',
+    stopped: '<rect x="5" y="5" width="10" height="10"/>',
+  };
   const state = el("button", {
     type: "button",
     disabled: true,
-    className: `result-state ${complete ? "is-complete" : "is-processing"}`,
-    title: complete ? "Proses selesai" : "Sedang memproses",
-    ariaLabel: complete ? "Proses selesai" : "Sedang memproses",
+    className: `result-state is-${stateName}`,
+    title: labels[stateName],
+    ariaLabel: labels[stateName],
   });
-  state.innerHTML = complete
-    ? '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5"/></svg>'
-    : '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/></svg>';
+  state.innerHTML = `<svg viewBox="0 0 20 20" aria-hidden="true">${icons[stateName]}</svg>`;
   return state;
 }
 
 function titleActions(p: Project): HTMLElement[] {
   const actions: HTMLElement[] = [resultStatus(p)];
+  const busy = isProjectProcessing(p);
+  const remove = el("button", { type: "button", className: "text-button outline-button is-danger project-delete" }, icon("trash"), "Hapus");
+  remove.disabled = busy;
+  remove.title = busy ? "Hentikan proses dulu sebelum menghapus" : "Hapus project ini";
+  remove.addEventListener("click", async () => {
+    if (await askDeleteProject(p)) closeEditor();
+  });
   if (p.has_export_dir) {
     const open = el("button", { type: "button", className: "text-button result-open", textContent: "Buka" });
     open.disabled = !p.export_ready;
@@ -375,6 +466,7 @@ function titleActions(p: Project): HTMLElement[] {
     });
     actions.push(open);
   }
+  actions.push(remove);
   return actions;
 }
 
@@ -411,8 +503,8 @@ async function loadDashboardTexts(id: string, scope: HTMLElement, routeId: strin
 type SequenceState = { status: "idle" | "running" | "done" | "error"; progress: number; message: string };
 type CoverState = { status: "idle" | "running" | "done" | "error"; progress: number; message: string; has_applied: boolean; title: string };
 const sequenceActivators = new WeakMap<Element, () => void>();
-const projectObservers = new Set<IntersectionObserver>();
-const rowObservers = new Set<ResizeObserver>();
+const projectObservers = new Map<HTMLElement, IntersectionObserver>();
+const rowObservers = new Map<HTMLOListElement, ResizeObserver>();
 
 function scrollButtons(grid: HTMLOListElement, row: HTMLElement) {
   grid.tabIndex = 0;
@@ -440,7 +532,7 @@ function scrollButtons(grid: HTMLOListElement, row: HTMLElement) {
   grid.onscroll = update;
   if ("ResizeObserver" in window) {
     const observer = new ResizeObserver(update);
-    rowObservers.add(observer);
+    rowObservers.set(grid, observer);
     observer.observe(grid);
   }
   window.setTimeout(update, 0);
@@ -595,22 +687,23 @@ function sequenceCard(p: Project, scope: HTMLElement, routeId: string): HTMLLIEl
   return card;
 }
 
-let follow = 0;
-/** After a retry, re-render the editor until the clip settles. */
+const follow = new Map<string, number>();
+/** Follow every running project shown in the dashboard. */
 function followUntilDone(id: string, routeId = editing) {
-  clearTimeout(follow);
-  follow = window.setTimeout(async () => {
-    if (editing !== routeId) return;
+  if (!routeId || follow.has(id)) return;
+  const timer = window.setTimeout(async () => {
+    let project: Project | undefined;
     try {
-      const response = await fetch(`/api/projects/${id}`);
-      if (!response.ok) throw new Error(`status ${response.status}`);
-      const p: Project = await response.json();
-      if (["done", "error", "cancelled"].includes(p.status)) void renderEditor(routeId);
-      else followUntilDone(id, routeId);
-    } catch {
-      if (editing === routeId) followUntilDone(id, routeId);
-    }
+      const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, { cache: "no-store" });
+      if (response.ok) project = await response.json();
+    } catch { /* Try again while the dashboard is open. */ }
+    if (follow.get(id) !== timer) return;
+    follow.delete(id);
+    if (editing !== routeId) return;
+    if (project && !isProjectProcessing(project)) refreshDashboardProject(project, routeId);
+    else followUntilDone(id, routeId);
   }, 2000);
+  follow.set(id, timer);
 }
 
 export function openYoutubeInBrowser(control: HTMLElement, url: string, event?: MouseEvent): void {
@@ -657,6 +750,7 @@ function dashboardProject(p: Project, routeId: string, selected: boolean): HTMLE
 
   const combined = p.settings.mode === "filming" ? sequenceCard(p, grid, routeId) : null;
   grid.replaceChildren(...p.clips.map((c) => clipCard(p, c)), ...(combined ? [combined] : []));
+  if (isProjectProcessing(p)) followUntilDone(p.id, routeId);
 
   // Keep off-screen projects inexpensive, but the project the user opened is ready immediately.
   const load = () => {
@@ -678,14 +772,37 @@ function dashboardProject(p: Project, routeId: string, selected: boolean): HTMLE
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         observer.disconnect();
-        projectObservers.delete(observer);
+        projectObservers.delete(section);
         activate();
       }
     }, { root: editor, rootMargin: "300px" });
-    projectObservers.add(observer);
+    projectObservers.set(section, observer);
     observer.observe(section);
   }, 0);
   return section;
+}
+
+function refreshDashboardProject(project: Project, routeId: string) {
+  const current = document.getElementById(`project-dashboard-${project.id}`);
+  const currentGrid = current?.querySelector<HTMLOListElement>(".editor-clips");
+  if (!current || !currentGrid) return;
+  const next = dashboardProject(project, routeId, current.classList.contains("is-target"));
+  const nextGrid = next.querySelector<HTMLOListElement>(".editor-clips")!;
+  const focused = document.activeElement as HTMLElement | null;
+  const descriptions = new Map([...currentGrid.querySelectorAll<HTMLElement>("[data-text-id]:not([data-text-id='sequence'])[data-loaded='true']")]
+    .map((slot) => [slot.dataset.textId, slot]));
+  nextGrid.querySelectorAll<HTMLElement>("[data-text-id]").forEach((slot) => {
+    const loaded = descriptions.get(slot.dataset.textId);
+    if (loaded) slot.replaceWith(loaded);
+  });
+  projectObservers.get(current)?.disconnect();
+  projectObservers.delete(current);
+  rowObservers.get(currentGrid)?.disconnect();
+  rowObservers.delete(currentGrid);
+  const scrollLeft = currentGrid.scrollLeft;
+  current.replaceWith(next);
+  nextGrid.scrollLeft = scrollLeft;
+  if (focused && nextGrid.contains(focused)) focused.focus({ preventScroll: true });
 }
 
 function scrollToDashboardProject(section: HTMLElement, routeId: string) {
@@ -701,7 +818,7 @@ async function renderEditor(id: string) {
   editing = id;
   editorHint.textContent = "";
   editorHint.classList.remove("error");
-  const res = await fetch(`/api/projects/${id}`);
+  const res = await fetch(`/api/projects/${id}`, { cache: "no-store" });
   if (editing !== id || editor.hidden) return;
   if (!res.ok) {
     editorClips.replaceChildren();
@@ -720,10 +837,9 @@ async function renderEditor(id: string) {
   editorPrimaryRow && (editorPrimaryRow.hidden = true);
   editorClips.replaceChildren();
   otherProjects.replaceChildren();
-  if (!["done", "error", "cancelled"].includes(selected.status)) followUntilDone(id);
 
   try {
-    const listResponse = await fetch("/api/projects");
+    const listResponse = await fetch("/api/projects", { cache: "no-store" });
     if (!listResponse.ok) throw new Error("status " + listResponse.status);
     const listed: Project[] = await listResponse.json();
     if (editing !== id || editor.hidden) return;
@@ -749,6 +865,8 @@ async function renderEditor(id: string) {
 
 /** #/project/<id> opens the editor; anything else closes it. */
 function route() {
+  for (const timer of follow.values()) window.clearTimeout(timer);
+  follow.clear();
   const m = location.hash.match(/^#\/project\/([\w-]+)$/);
   if (m) {
     editor.hidden = false;

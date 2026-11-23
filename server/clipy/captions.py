@@ -9,6 +9,7 @@ so a stressed word always reads differently from the rest of the sentence
 
 from __future__ import annotations
 
+import colorsys
 import re
 from collections.abc import Set
 from dataclasses import dataclass, field
@@ -171,6 +172,7 @@ def normalize_font(font: str | None) -> str:
     return font if font in CAPTION_FONTS else DEFAULT_FONT
 
 ANIMATIONS = {
+    "plain": "Plain",
     "clean": "Clean",
     "marker": "Marker",
     "karaoke": "Karaoke",
@@ -181,6 +183,11 @@ ANIMATIONS = {
     "rise": "Fly In",
     "duo": "Serif Accent",
     "script": "Script Accent",
+    "block": "Block Word",
+    "extrude": "3D Text",
+    "typewriter": "Typewriter",
+    "punchy": "Punchy",
+    "chip": "Pill Highlight",
 }
 ANIMATION_ALIASES = {
     # Styles of earlier releases, kept so saved projects and presets still load.
@@ -207,6 +214,8 @@ class StyleSpec:
 
 
 STYLES = {
+    # Plain white text: no emphasis, no animation.
+    "plain": StyleSpec("Base", "Base", 1.0),
     "clean": StyleSpec("Base", "Strong", 1.30),
     "marker": StyleSpec("Base", "Strong", 1.08),
     "karaoke": StyleSpec("Base", "Strong", 1.22),
@@ -218,6 +227,17 @@ STYLES = {
     # Emphasized words switch to a contrasting typeface as well as a bigger size.
     "duo": StyleSpec("Base", "Strong", 1.48, strong_font="dm-serif"),
     "script": StyleSpec("Base", "Strong", 1.72, strong_font="caveat"),
+    # Words appear one by one; stressed words get a flat highlighter block that
+    # sweeps in left to right as they are spoken.
+    "block": StyleSpec("Base", "Strong", 1.04),
+    # Chunky letters in the caption colour with a deep extruded side below.
+    "extrude": StyleSpec("Strong", "Strong", 1.2),
+    # Each word is typed letter by letter behind a blinking cursor.
+    "typewriter": StyleSpec("Base", "Strong", 1.12),
+    # One word per screen that slams in big and shakes as it lands.
+    "punchy": StyleSpec("Strong", "Strong", 1.25),
+    # Short phrases on a white pill; the spoken word gets a coloured highlight.
+    "chip": StyleSpec("Strong", "Strong", 1.06, size=.86, case="upper"),
 }
 
 # When the chosen caption font already is the accent typeface, use this one instead.
@@ -283,7 +303,24 @@ COLORS = {
     "cyan": "#33E1FF",
     "pink": "#FF4FD8",
     "red": "#FF3B30",
+    "lime": "#DAFF50",
 }
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def color_hex(color: str | None) -> str | None:
+    """A caption colour as #RRGGBB: one of the named colours or a custom hex."""
+    if color in COLORS:
+        return COLORS[color]
+    if color and HEX_COLOR.match(color):
+        return color.upper()
+    return None
+
+
+def accent_hex(color: str | None) -> str:
+    return color_hex(color) or COLORS[DEFAULT_COLOR]
+
+
 CASES = {"upper": "UPPERCASE", "lower": "lowercase", "title": "Title Case", "sentence": "Sentence case"}
 
 OPTIONS = {
@@ -305,6 +342,8 @@ MIN_CHUNK = 0.35
 ROW_HEIGHT = 1.18
 ROW_BASELINE = .92
 MARKER_PAD = .17
+BLOCK_PAD = .10
+CHIP_PAD = .09    # side padding of the spoken-word highlight inside a pill, per em   # side padding of the highlighter block, per em
 
 
 @dataclass
@@ -497,7 +536,8 @@ def _caption_cues(words: list[Word], style: CaptionStyle, width: int, height: in
             return _font(face, px, role)
         return _file_font((accent_font if accent else caption_font).file(role), px)
 
-    single = style.display == "word" or (style.display is None and style.animation == "word")
+    single = (animation == "punchy" or style.display == "word"
+              or (style.display is None and style.animation == "word"))
     sentence = style.display == "sentence"
     headline = animation == "headline" and not single
     font_size = 1.0 if legacy else caption_font.size
@@ -505,8 +545,13 @@ def _caption_cues(words: list[Word], style: CaptionStyle, width: int, height: in
     base_font = face_for(spec.base, size)
     limit = width * .84
     max_lines = min(style.max_lines, MAX_LINES) if sentence and not headline else 1
+    chip = animation == "chip" and not single
     if single:
         chunks = [Chunk([word], word.start, word.end + LINGER) for word in words]
+    elif chip:
+        # A pill holds a short phrase on one row.
+        chunks = chunk_words(words, 3, layout.max_chars + 8)
+        max_lines = 1
     elif headline:
         # Short punchy groups so the stressed word can take a row of its own.
         chunks = chunk_words(words, layout.max_words * 2, layout.max_chars * 2)
@@ -546,6 +591,12 @@ def _caption_cues(words: list[Word], style: CaptionStyle, width: int, height: in
             advance, scale = measure(label, scale, strong)
             if strong and animation == "marker":
                 advance += 2 * size * scale * MARKER_PAD  # room for the box
+            elif strong and animation == "block":
+                advance += 2 * size * scale * BLOCK_PAD  # room for the highlighter
+            elif animation == "chip":
+                advance += 2 * size * scale * CHIP_PAD  # room for the word highlight
+            elif animation == "extrude":
+                advance += size * scale * .14  # the thick rim needs air between words
             items.append(Item(word, label, advance, scale, strong))
         if not items:
             continue
@@ -605,16 +656,17 @@ def _rounded_box(width: int, height: int, radius: int) -> str:
             f"l 0 {r} b 0 {r-k} {r-k} 0 {r} 0")
 
 
-def _contrasting_ink(rgb: str) -> str:
+def _contrasting_ink(rgb: str, threshold: float = .179) -> str:
     def linear(channel):
         s = int(channel, 16) / 255
         return s / 12.92 if s <= .04045 else ((s + .055) / 1.055) ** 2.4
 
     lightness = sum(weight * linear(rgb[i:i+2]) for i, weight in ((1, .2126), (3, .7152), (5, .0722)))
-    return "#0A0C12" if lightness >= .179 else "#FFFFFF"
+    return "#0A0C12" if lightness >= threshold else "#FFFFFF"
 
 
 INK = "#0A0C12"
+CHIP_INK = "#0D0E13"   # letters on the white pill, as in the reference reel
 
 
 RISE_TIME = .42   # seconds from first frame to landing (ease-outs read best at 200-500 ms)
@@ -636,9 +688,67 @@ def _shadow_alpha(alpha: str) -> str:
     return f"&H{max(0x60, value):02X}&"
 
 
+BLOCK_SWEEP = .16  # seconds for the highlighter to cover a word
+TYPE_STEP = .045   # seconds per typed letter, squeezed when a word is spoken faster
+CURSOR_BLINK = .45
+
+
+def _extrude_side(rgb: str) -> str:
+    """The darker side colour of 3D letters: a warmer, deeper shade of the face.
+
+    Yellow turns orange, as in classic game titles; greys and white turn grey.
+    """
+    r, g, b = (int(rgb[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    if s < .15:
+        r, g, b = r * .6, g * .6, b * .6
+    else:
+        r, g, b = colorsys.hsv_to_rgb((h - 22 / 360) % 1, min(1.0, s * 1.05 + .1), v * .8)
+    return "#" + "".join(f"{round(c * 255):02X}" for c in (r, g, b))
+
+
+def _block_runs(row, x: float, baseline: float, cue, size: int, faces: dict, hi: str, dark: str, emit, ms) -> None:
+    """Highlighter blocks behind runs of stressed words in one caption row.
+
+    A run of neighbouring stressed words shares one block. It starts with the
+    first word and its right edge sweeps on with each word as it is spoken,
+    like a marker pen drawn across the line.
+    """
+    spans = []  # (left, right, item)
+    for item in row:
+        spans.append((x, x + item.advance, item))
+        x += item.advance + cue.space
+    runs: list[list[tuple]] = []
+    for span in spans:
+        if span[2].strong:
+            if runs and runs[-1][-1] is spans[spans.index(span) - 1]:
+                runs[-1].append(span)
+            else:
+                runs.append([span])
+    cap = faces["strong"][3]
+    for run in runs:
+        px = size * max(item.scale for _, _, item in run)
+        pad_top, pad_bottom = px * .14, px * .2
+        left, right = run[0][0], run[-1][1]
+        top = baseline - px * cap - pad_top
+        bottom = baseline + pad_bottom
+        t0 = max(cue.start, run[0][2].word.start)
+        l, tp, b = round(left), round(top) - 2, round(bottom) + 2
+        sweep = fr"\clip({l},{tp},{l + 1},{b})"
+        for wl, wr, item in run:
+            at = ms(max(0.0, max(cue.start, item.word.start) - t0))
+            sweep += fr"\t({at},{at + ms(BLOCK_SWEEP)},\clip({l},{tp},{round(wr)},{b}))"
+        box_w, box_h = round(right - left), round(bottom - top)
+        shape = (fr"\an7\pos({l},{round(top)})\p1\bord0\shad{max(1, round(size * .04))}"
+                 fr"\4c{dark}\4a&H80&\1c{hi}" + sweep)
+        emit(t0, cue.end, shape, _rounded_box(box_w, box_h, round(box_h * .08)), name="Shape", layer=1)
+
+
 def build_ass(words: list[Word], style: CaptionStyle, width: int = 1080, height: int = 1920, *,
               offset: float = 0, emphasized: Set[int] = frozenset()) -> str:
     animation = normalize_animation(style.animation)
+    if animation == "plain":
+        emphasized = frozenset()
     spec = STYLES[animation]
     caption_font = CAPTION_FONTS[normalize_font(style.font)]
     family = caption_font.family(spec.base)
@@ -648,15 +758,18 @@ def build_ass(words: list[Word], style: CaptionStyle, width: int = 1080, height:
     for key, font, role in (("base", caption_font, spec.base), ("strong", accent_font, spec.strong)):
         scale_em, descent_em, cap_em, weight_class = _file_metrics(font.file(role))
         faces[key] = (font.family(role), scale_em, descent_em, cap_em, weight_class)
-    accent = COLORS.get(style.color, COLORS[DEFAULT_COLOR])
+    accent = accent_hex(style.color)
     # White accents would be invisible as "emphasis" on white text; give them
     # a warm cream instead so the stressed word still reads as different.
-    if accent == "#FFFFFF" and animation != "marker":
+    if accent == "#FFFFFF" and animation not in ("marker", "block", "extrude"):
         accent = COLORS["cream"]
     hi = tag_color(accent)
     white = tag_color("#FFFFFF")
     dark = tag_color(INK)
     marker_ink = tag_color(_contrasting_ink(accent))
+    # The highlighter keeps white letters on mid-tone blocks (red, pink, orange);
+    # only light blocks such as yellow or cream switch to dark letters.
+    block_ink = tag_color(_contrasting_ink(accent, .4))
     baseline_y = layout_for(width, height).baseline
     center = baseline_y if style.position is None else round(height * (0.17 + (style.position - 1) * 0.11))
     stack_shift = round(height * 0.79) - baseline_y if style.position is None and height > width else 0
@@ -686,6 +799,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def ms(seconds: float) -> int:
         return max(0, round(seconds * 1000))
 
+    def text_width(label: str, strong: bool, px: float) -> float:
+        font = accent_font if strong else caption_font
+        return _file_font(font.file(spec.strong if strong else spec.base), max(1, round(px))).getlength(label)
+
+    side = tag_color(_extrude_side(accent))
+
     for cue in _caption_cues(words, style, width, height, emphasized=emphasized):
         size = cue.size
         total = sum(cue.row_heights)
@@ -708,6 +827,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             baseline = top + size * biggest * ROW_BASELINE
             row_width = sum(item.advance for item in row) + (len(row) - 1) * cue.space
             x = (width - row_width) / 2
+            if animation == "block":
+                _block_runs(row, x, baseline, cue, size, faces, hi, dark, emit, ms)
+            if animation == "chip":
+                # The white pill behind the phrase fades and grows in with it.
+                cap_px = size * faces["base"][3]
+                pad_x, pad_top, pad_bottom = size * .22, size * .2, size * .24
+                pill_w, pill_h = round(row_width + 2 * pad_x), round(cap_px + pad_top + pad_bottom)
+                pcx, pcy = round(width / 2), round(baseline - cap_px - pad_top + pill_h / 2)
+                emit(cue.start, cue.end,
+                     fr"\an5\pos({pcx},{pcy})\p1\bord0\shad{max(1, round(size * .04))}\4c{dark}\4a&HA0&\1c&HFFFFFF&"
+                     r"\fscx92\fscy80\1a&H80&\t(0,130,\fscx100\fscy100\1a&H00&)",
+                     _rounded_box(pill_w, pill_h, round(pill_h * .2)), name="Shape", layer=0)
             for item in row:
                 word, text, advance, scale, strong = item
                 start = max(cue.start, word.start)
@@ -740,6 +871,96 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     emit(start, cue.end, shape + pop, drawing, name="Shape", layer=0)
                     emit(cue.start, start, ink + entrance, text, layer=layer)
                     emit(start, cue.end, ink + pop, text, layer=layer)
+                elif animation == "block":
+                    # Word-by-word reveal: each word fades in and settles up a
+                    # few pixels exactly when it is spoken.
+                    ax, ay = round(cx), round(baseline + px * descent)
+                    drop = max(2, round(size * .16))
+                    rise = (fr"\an2\move({ax},{ay + drop},{ax},{ay},0,170)\fs{px * font_scale:.2f}" + weight)
+                    if strong:
+                        ink = rise + fr"\bord0\shad0\1c{block_ink}\1a&HFF&\t(40,150,\1a&H00&)"
+                        emit(start, cue.end, ink, text, layer=layer)
+                    else:
+                        fade = r"\1a&HFF&\3a&HFF&\4a&HFF&\t(0,120,\1a&H00&\3a&H00&\4a&H60&)"
+                        emit(start, cue.end, rise + contour + fr"\1c{white}" + fade, text, layer=layer)
+                elif animation == "extrude":
+                    # 3D letters: a dark rim around the whole shape, a stack of
+                    # copies in the darker side colour going down, and the face
+                    # in the caption colour on top.
+                    ax, ay = round(cx), round(baseline + px * descent)
+                    depth = max(3, round(px * .11))
+                    rim = max(2, round(px * .085))
+                    base_tags = fr"\an2\fs{px * font_scale:.2f}" + weight + r"\blur0.6"
+                    pulse = ""
+                    if strong:
+                        at = ms(start - cue.start)
+                        pulse = fr"\t({at},{at + 90},\fscx110\fscy110)\t({at + 90},{at + 220},\fscx100\fscy100)"
+                    shade = fr"\xshad0\yshad{max(1, round(px * .05))}\4c{dark}\4a&H70&"
+                    for dy, extra in ((depth, shade), (0, r"\shad0")):
+                        emit(cue.start, cue.end, base_tags + fr"\pos({ax},{ay + dy})\bord{rim}\3c{dark}\1c{dark}" + extra + pulse,
+                             text, layer=0)
+                    for dy in range(depth, 0, -2):
+                        emit(cue.start, cue.end, base_tags + fr"\pos({ax},{ay + dy})\bord{max(1, round(px * .03))}\shad0"
+                             fr"\3c{side}\1c{side}" + pulse, text, layer=1)
+                    emit(cue.start, cue.end, base_tags + fr"\pos({ax},{ay})\bord{max(1, round(px * .025))}\shad0"
+                         fr"\3c{side}\1c{hi}" + pulse, text, layer=2)
+                elif animation == "typewriter":
+                    # Letters appear one at a time from the moment the word is
+                    # spoken; a caret follows the last letter and blinks while
+                    # waiting for the next word.
+                    left = cx - advance / 2
+                    letters = len(text)
+                    until = next_start.get(id(word), cue.end)
+                    typing = min(max(.06, until - start), TYPE_STEP * letters)
+                    step = typing / max(1, letters)
+                    top_y, bottom_y = round(baseline - px * 1.25), round(baseline + px * .55)
+                    pad = px * .12
+                    caret_w, caret_h = max(4, round(px * .15)), round(px * cap * 1.12)
+                    caret_top = round(baseline - px * cap * 1.06)
+
+                    def caret(at: float, until: float, x_edge: float) -> None:
+                        # Thicker than a text stroke, with the same dark rim and shadow
+                        # as the letters, and clear of the last letter's outline.
+                        emit(at, until, fr"\an7\pos({round(x_edge + px * .17)},{caret_top})\p1" + contour + fr"\1c{hi}",
+                             f"m 0 0 l {caret_w} 0 {caret_w} {caret_h} 0 {caret_h}", name="Shape", layer=4)
+
+                    for k in range(1, letters + 1):
+                        t0 = start + step * (k - 1)
+                        t1 = start + step * k if k < letters else cue.end
+                        edge = left + text_width(text[:k], strong, px)
+                        clip = fr"\clip({round(left - pad)},{top_y},{round(edge + px * .04)},{bottom_y})" if k < letters else ""
+                        emit(t0, t1, look + clip, text, layer=layer)
+                        if k < letters:
+                            caret(t0, t1, edge)
+                    edge = left + text_width(text, strong, px)
+                    done, blink, on = start + typing, start + typing, True
+                    while blink < until - .01:
+                        nxt = min(until, blink + CURSOR_BLINK)
+                        if on:
+                            caret(blink, nxt, edge)
+                        blink, on = nxt, not on
+                elif animation == "punchy":
+                    # The word cuts in big and tilted, holds for a beat, then
+                    # snaps down to its resting size, upright. A hard drop
+                    # shadow instead of a soft glow keeps it punchy.
+                    hold = ms(min(.36, max(.12, (end - start) * .5)))
+                    hard = (fr"\bord{max(1, round(px * .03))}\3c{dark}\3a&H00&\blur0"
+                            fr"\xshad{max(1, round(px * .03))}\yshad{max(2, round(px * .065))}\4c{dark}\4a&H00&")
+                    punch = fr"\fscx135\fscy135\frz4\t({hold},{hold + 33},\fscx100\fscy100\frz0)"
+                    emit(start, cue.end, anchor + weight + hard + fr"\1c{color}" + punch, text, layer=layer)
+                elif animation == "chip":
+                    # Dark words grow in with the pill; the word being spoken sits
+                    # on a highlight in the caption colour.
+                    ax, ay = round(cx), round(baseline + px * descent)
+                    ink = (fr"\an2\pos({ax},{ay})\fs{px * font_scale:.2f}" + weight
+                           + fr"\bord0\shad0\blur0.4\1c{tag_color(CHIP_INK)}" + r"\fscx40\fscy40\t(0,140,\fscx100\fscy100)")
+                    emit(cue.start, cue.end, ink, text, layer=3)
+                    cap_px = px * cap
+                    box_h = round(cap_px + px * .3)
+                    box_w = round(advance)
+                    bx, by = round(cx), round(baseline - cap_px - px * .13 + box_h / 2)
+                    emit(start, end, fr"\an5\pos({bx},{by})\p1\bord0\shad0\1c{hi}\fad(50,50)",
+                         _rounded_box(box_w, box_h, round(box_h * .18)), name="Shape", layer=1)
                 elif animation == "karaoke":
                     dim = anchor + weight + contour + fr"\1c{color}\1a&H70&\3a&H70&\4a&HB0&"
                     if not strong:

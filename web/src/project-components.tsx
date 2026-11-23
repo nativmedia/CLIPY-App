@@ -3,7 +3,7 @@
 import { useState, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { clipLayout, type Clip, type Project } from "./editor";
+import { clipLayout, isProjectProcessing, type Clip, type Project } from "./editor";
 
 type LabelGroup = "animations" | "fonts" | "cases" | "title_styles" | "voices" | "brand_styles";
 type SettingsProps = {
@@ -46,7 +46,7 @@ function ClipResult({ project, clip, onPreview, onRetry, onRefresh }: ResultsPro
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState("");
   const [openingFolder, setOpeningFolder] = useState(false);
-  const running = !["done", "error", "cancelled"].includes(project.status);
+  const running = isProjectProcessing(project);
   const errorText = clip.error?.includes("name 'film' is not defined") ? "Kesalahan pembacaan rasio video" : clip.error;
   const onEnter = (event: MouseEvent<HTMLElement>) => {
     const name = event.currentTarget;

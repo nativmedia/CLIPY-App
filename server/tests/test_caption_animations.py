@@ -53,7 +53,7 @@ class CaptionAnimationTests(unittest.TestCase):
                          captions.build_ass(words, captions.CaptionStyle(font="caveat", animation="clean"), 360, 640))
 
     def test_styles_accept_legacy_animation_values(self):
-        expected = {"clean", "marker", "karaoke", "pop", "aesthetic", "headline", "glow", "rise", "duo", "script"}
+        expected = {"plain", "clean", "marker", "karaoke", "pop", "aesthetic", "headline", "glow", "rise", "duo", "script", "block", "extrude", "typewriter", "punchy", "chip"}
         self.assertEqual(set(captions.OPTIONS["animations"]), expected)
         self.assertEqual(set(captions.STYLES), expected)
         for legacy in ("focus", "pill", "outline", "editorial", "highlight", "box", "glow", "fade",
@@ -64,6 +64,8 @@ class CaptionAnimationTests(unittest.TestCase):
     def test_every_style_makes_the_detected_word_bigger_and_heavier(self):
         words = [captions.Word("Lihat", 0, .35), captions.Word("ini", .35, .6), captions.Word("penting", .6, 1.0)]
         for animation in captions.OPTIONS["animations"]:
+            if animation == "plain":
+                continue  # plain text on purpose has no emphasis
             with self.subTest(animation=animation):
                 style = captions.CaptionStyle(display="sentence", animation=animation, color="yellow")
                 ass = captions.build_ass(words, style, 360, 640, emphasized={2})
