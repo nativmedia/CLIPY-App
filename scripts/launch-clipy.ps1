@@ -76,7 +76,7 @@ function Get-Fingerprint([string[]]$Patterns) {
   finally { $sha.Dispose() }
 }
 
-$ApiFiles = @('server\app.py', 'server\clipy\*.py', 'server\fonts\*', 'server\requirements.txt')
+$ApiFiles = @('server\app.py', 'server\clipy\*.py', 'web\public\fonts\*', 'server\requirements.txt')
 $WebFiles = @('package.json', 'package-lock.json', 'web\package.json', 'web\vite.config.ts')
 
 function Read-State {

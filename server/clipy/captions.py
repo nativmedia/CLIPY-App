@@ -20,6 +20,8 @@ from typing import NamedTuple
 from fontTools.ttLib import TTFont
 from PIL import ImageFont
 
+from .fonts import FONT_DIR
+
 
 @dataclass
 class Word:
@@ -92,7 +94,7 @@ class CaptionStyle:
     text_style: str = "plain"
 
 
-# Family names as libass sees them (the TTFs live in server/fonts).
+# Family names as libass sees them.
 FONTS = {
     "plus-jakarta": ("Plus Jakarta Sans", "Plus Jakarta Sans"),
     "anton": ("Anton", "Anton"),
@@ -117,8 +119,6 @@ FONT_FILES = {
     "jetbrains-mono": "JetBrainsMono[wght].ttf",
     "gaegu": "Gaegu-Regular.ttf",
 }
-FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
-
 
 @dataclass(frozen=True)
 class CaptionFont:

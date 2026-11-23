@@ -33,9 +33,11 @@ COPY hyperframes-renderer/effects.js hyperframes-renderer/
 
 COPY server/app.py server/docker_app.py server/
 COPY server/clipy/ server/clipy/
-COPY server/fonts/ server/fonts/
 COPY --from=web-build /app/web/dist/ web/dist/
-RUN install -d -o clipy -g clipy /app/server/data /home/clipy/.cache/huggingface
+# The renderer uses the same fonts that the web build ships for previews.
+RUN mkdir -p web/public \
+    && ln -s ../dist/fonts web/public/fonts \
+    && install -d -o clipy -g clipy /app/server/data /home/clipy/.cache/huggingface
 
 USER clipy
 WORKDIR /app/server

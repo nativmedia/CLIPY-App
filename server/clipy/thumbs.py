@@ -9,7 +9,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-FONT = Path(__file__).resolve().parent.parent / "fonts" / "Montserrat-Black.ttf"
+from .fonts import FONT_DIR
+
+FONT = FONT_DIR / "Montserrat-Black.ttf"
 
 TITLE_STYLES = {
     "none": "No title",
@@ -32,7 +34,7 @@ BRAND_STYLES = {
     "pill": "White pill",
 }
 BRAND_OPACITIES = [20, 40, 60, 80, 100]
-BRAND_FONT = Path(__file__).resolve().parent.parent / "fonts" / "Montserrat-ExtraBold.ttf"
+BRAND_FONT = FONT_DIR / "Montserrat-ExtraBold.ttf"
 
 
 def _brand_text(text: str, style: str, size: int) -> Image.Image:

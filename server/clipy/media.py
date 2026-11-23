@@ -18,7 +18,7 @@ from pathlib import Path
 import yt_dlp
 from yt_dlp.utils import download_range_func
 
-FONTS_DIR = Path(__file__).resolve().parent.parent / "fonts"
+from .fonts import FONT_DIR
 
 # Output frame per aspect ratio.
 RATIOS = {
@@ -539,7 +539,7 @@ def render_clip(source: Path, ass: Path, out: Path, width: int, height: int, fit
     work = out.parent
     # libass paths go inside a filter string, where ':' and '\' need escaping on Windows;
     # relative paths from the work folder sidestep all of that.
-    fonts = os.path.relpath(FONTS_DIR, work).replace("\\", "/")
+    fonts = os.path.relpath(FONT_DIR, work).replace("\\", "/")
     rel_src = os.path.relpath(source, work)
     offset = start_time(source)
     inputs = ["-i", rel_src]
