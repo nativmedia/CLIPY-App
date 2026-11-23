@@ -1,0 +1,20 @@
+name: clipy-id
+services:
+  clipy:
+    build: .
+    image: clipy-id:local
+    init: true
+    ports:
+      - "127.0.0.1:4747:4747"
+    volumes:
+      - clipy-data:/app/server/data
+      - whisper-cache:/home/clipy/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:4747/api/options', timeout=5).close()"]
+      interval: 15s
+      timeout: 6s
+      start_period: 20s
+      retries: 4
+volumes:
+  clipy-data:
+  whisper-cache:

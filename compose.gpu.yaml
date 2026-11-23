@@ -1,0 +1,21 @@
+services:
+  clipy:
+    # Kiri on Windows accepts a WSL device mapping instead of Docker's GPU request.
+    devices:
+      - "/dev/dxg:/dev/dxg"
+    volumes:
+      - type: bind
+        source: /usr/lib/wsl/lib
+        target: /usr/lib/wsl/lib
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /usr/lib/wsl/drivers
+        target: /usr/lib/wsl/drivers
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      CLIPY_WHISPER_DEVICE: auto
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib:/app/server/.venv/lib/python3.12/site-packages/nvidia/cublas/lib:/app/server/.venv/lib/python3.12/site-packages/nvidia/cudnn/lib

@@ -49,6 +49,51 @@ Di PowerShell Windows, gunakan `npm.cmd` jika perintah `npm` diblokir oleh kebij
 
 **npm run setup** menyiapkan lingkungan Python lokal dan model untuk crop serta deteksi tawa. Setelah itu cukup gunakan **npm run dev:desktop** untuk membuka aplikasi lagi. Selesaikan pekerjaan video yang sedang berjalan sebelum menutup jendela.
 
+## Jalankan dengan Kiri
+
+Buka Kiri dan pastikan engine berjalan. Dari folder repo, jalankan
+`docker --context kiri compose up -d --build`. Buka
+[CLIPY.ID](http://127.0.0.1:4747) di browser. Di Kiri, buka **Docker → Containers**
+untuk melihat status dan log container CLIPY.ID.
+
+Versi Docker menggunakan CPU dan menyimpan proyek, pengaturan, serta cache model
+transkripsi di volume Docker tersendiri. Untuk video lokal, gunakan unggahan di
+browser. Dialog file dan perintah untuk membuka folder Windows tersedia di versi desktop.
+
+### GPU NVIDIA di Kiri untuk Windows
+
+Konfigurasi GPU meneruskan perangkat GPU WSL dan memasang pustaka driver NVIDIA
+dalam mode hanya baca. Jalankan dari PowerShell Windows dengan Kiri aktif dan
+driver NVIDIA untuk WSL terpasang. Tunggu proses video aktif selesai sebelum
+mengganti container. Volume proyek dan model tetap dipakai.
+
+```powershell
+docker --context kiri compose -f compose.yaml -f compose.gpu.yaml up -d
+docker --context kiri compose exec clipy python -c "from clipy.transcribe import device; print(device())"
+```
+
+Hasil `cuda` berarti CTranslate2 mendeteksi GPU. Uji transkripsi lokal dengan video
+pendek untuk memastikan model bisa berjalan. FFmpeg memakai NVENC jika lolos uji
+encoding, dengan libx264 sebagai cadangan. Jika GPU WSL gagal diakses, jalankan
+konfigurasi CPU dengan
+`docker --context kiri compose up -d`.
+
+### Akses dari HP lewat Tailscale
+
+Sambungkan PC dan HP ke tailnet yang sama. Dari PowerShell Windows, pastikan
+`http://127.0.0.1:4747/api/options` merespons sebelum mengaktifkan Tailscale Serve.
+Aplikasi ini memberi akses ke data proyek dan pengaturan. Batasi akses tailnet
+ke perangkat atau pengguna yang Anda percayai.
+
+```powershell
+tailscale serve status
+tailscale serve --https=8443 4747
+```
+
+Buka URL HTTPS yang tercetak di browser HP. Untuk tes awal, biarkan PowerShell
+terbuka. Setelah berhasil, tambahkan `--bg` jika ingin menutup PowerShell.
+Gunakan port lain jika `8443` sudah dipakai.
+
 ## Prasyarat
 
 Semua platform memerlukan Git, Node.js 24 LTS dengan npm, Python 3.12, Rust stable, serta FFmpeg dan FFprobe dengan libass dan libx264. Gunakan versi yang sudah terpasang jika memenuhi syarat.
